@@ -1,16 +1,15 @@
 {
-  "name": "PAGE FORMAT WEB APP",
+  "name": "app-script-starter-kit",
   "private": true,
   "version": "1.0.0",
-  "description": "Pageformat mulit seet webapp — Google Apps Script web app, pushed via clasp.",
+  "description": "A Google Apps Script web app starter kit, synced to the Apps Script editor via clasp.",
   "scripts": {
     "login": "clasp login",
+    "pull": "clasp pull",
     "push": "clasp push --force",
     "watch": "clasp push --force --watch",
     "open": "clasp open --webapp",
-    "deployments": "clasp deployments",
-    "deploy": "clasp push --force && clasp deploy",
-    "deploy:prod": "clasp deploy"
+    "deploy": "clasp deploy"
   },
   "devDependencies": {
     "@google/clasp": "^3.3.0",

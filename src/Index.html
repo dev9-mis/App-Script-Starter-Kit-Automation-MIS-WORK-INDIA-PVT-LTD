@@ -3,33 +3,70 @@
   <head>
     <meta charset="UTF-8" />
     <base target="_top" />
-    <title>Margin Entry Form</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap"
-      rel="stylesheet"
-    />
-    <!-- flatpickr date picker (calendar) -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" />
-    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
-    <!-- Tailwind: utility classes for layout/spacing/grid/responsive only —
-         colors/buttons/design tokens stay in CSS.html per AGENTS.MD -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = { darkMode: 'class' };
-    </script>
-    <?!= include('CSS') ?>
-    <!-- Appearance: injected pref + engine, applied before first paint -->
-    <script>
-      window.__APPEARANCE__ = <?!= appearance ?>;
-    </script>
-    <?!= include('Theme') ?>
+    <title>App Script Starter Kit</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        max-width: 640px;
+        margin: 48px auto;
+        padding: 0 24px;
+        color: #1a1a1a;
+      }
+      h1 {
+        font-size: 1.5rem;
+      }
+      button {
+        padding: 8px 16px;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      #output {
+        margin-top: 16px;
+        padding: 12px;
+        background: #f4f4f4;
+        border-radius: 6px;
+        min-height: 24px;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
-    <?!= include('Common') ?> <?!= include('EntryForm') ?> <?!= include('DataTable') ?> <?!=
-    include('Report') ?> <?!= include('MasterAdd') ?> <?!= include('DateRange') ?> <?!=
-    include('ITDetails') ?> <?!= include('ITDetailsForm') ?> <?!= include('Backoffice') ?> <?!=
-    include('MarginEntry') ?>
+    <h1>App Script Starter Kit</h1>
+    <p>
+      This page is served by
+      <code>doGet()</code>
+      in
+      <code>Code.gs</code>
+      . Edit
+      <code>src/Index.html</code>
+      and
+      <code>src/Code.gs</code>
+      to build your app, then push with
+      <code>npm run push</code>
+      .
+    </p>
+
+    <input id="name" type="text" placeholder="Your name" />
+    <button onclick="callServer()">Say hello (via google.script.run)</button>
+    <div id="output"></div>
+
+    <script>
+      function callServer() {
+        var name = document.getElementById('name').value;
+        document.getElementById('output').textContent = 'Loading...';
+        google.script.run
+          .withSuccessHandler(function (result) {
+            document.getElementById('output').textContent = result;
+          })
+          .withFailureHandler(function (err) {
+            document.getElementById('output').textContent = 'Error: ' + err.message;
+          })
+          .sayHello(name);
+      }
+    </script>
   </body>
 </html>
