@@ -1,0 +1,19 @@
+{
+  "name": "PAGE FORMAT WEB APP",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pageformat mulit seet webapp — Google Apps Script web app, pushed via clasp.",
+  "scripts": {
+    "login": "clasp login",
+    "push": "clasp push --force",
+    "watch": "clasp push --force --watch",
+    "open": "clasp open --webapp",
+    "deployments": "clasp deployments",
+    "deploy": "clasp push --force && clasp deploy",
+    "deploy:prod": "clasp deploy"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.3.0",
+    "@types/google-apps-script": "^2.0.11"
+  }
+}

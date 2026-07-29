@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <base target="_top" />
+    <title>Margin Entry Form</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap"
+      rel="stylesheet"
+    />
+    <!-- flatpickr date picker (calendar) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <!-- Tailwind: utility classes for layout/spacing/grid/responsive only —
+         colors/buttons/design tokens stay in CSS.html per AGENTS.MD -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = { darkMode: 'class' };
+    </script>
+    <?!= include('CSS') ?>
+    <!-- Appearance: injected pref + engine, applied before first paint -->
+    <script>
+      window.__APPEARANCE__ = <?!= appearance ?>;
+    </script>
+    <?!= include('Theme') ?>
+  </head>
+  <body>
+    <div id="app"></div>
+    <?!= include('Common') ?> <?!= include('EntryForm') ?> <?!= include('DataTable') ?> <?!=
+    include('Report') ?> <?!= include('MasterAdd') ?> <?!= include('DateRange') ?> <?!=
+    include('ITDetails') ?> <?!= include('ITDetailsForm') ?> <?!= include('Backoffice') ?> <?!=
+    include('MarginEntry') ?>
+  </body>
+</html>

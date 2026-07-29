@@ -1,0 +1,964 @@
+<!-- ═══ ITDetailsForm.html — IT Details Add/Edit (full-page, swaps the table) ═══
+     Field list + conditional show/hide ported from the legacy "DATA ENTRY"
+     sheet (handleHideUnhide/save_data/recallData in itdeailsrefcode.gs), but
+     driven by the live RESPONSES-NEW header row (S.itDetails.headers) and the
+     DATABASE tab's dropdown source columns (S.itDetails.dbOptions) rather
+     than fixed cell offsets or hardcoded option lists.
+     Internal form state keys fields by each group's canonical alias
+     (aliases[0]); resolveItHeader maps that to whatever the live sheet
+     actually calls the column before saving, so header spelling drift
+     (e.g. "SHADIW" vs "SHADOW") doesn't break anything.
+     SelectPicker (type: plain / search-single / search-multi) is a small
+     reusable widget — kept here since this form is its only consumer today,
+     but variant-configurable so any future field can reuse it as-is.
+
+     THREE clean concerns you edit independently:
+       1. renderItFormBody — the form's actual HTML. Each field is a real
+                             element line: fText / fSelect / fPicker / fDate /
+                             fReadonly. Reorder/regroup freely. Conditional
+                             fields carry their show/hide inline, e.g.
+                             `vis.shadow ? fText('NAME OF SHADOW USER', …) : ''`.
+       2. itVisibility     — the ONE place the show/hide booleans are computed,
+                             shared by the layout, value-clearing, and save, so
+                             a field can never be shown one place and cleared in
+                             another. Change a rule here and it syncs everywhere.
+       3. IT_FIELD_GROUPS  — the field registry (aliases → live sheet header,
+                             plus picker config) used by save / edit / the
+                             Existing-Records table. It no longer renders the
+                             form; the HTML above owns layout. -->
+<script>
+  function isYesVal(v) {
+    return (
+      String(v || '')
+        .trim()
+        .toUpperCase() === 'YES'
+    );
+  }
+  function itSplitCsv(v) {
+    return String(v || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  function itSegment(fields) {
+    return String(fields['SEGMENT'] || '')
+      .trim()
+      .toUpperCase();
+  }
+  function itTodayFormatted() {
+    const d = new Date();
+    const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getDate())}-${M[d.getMonth()]}-${d.getFullYear()}`;
+  }
+
+  // Order = display order in the form. aliases[0] is the canonical internal
+  // key. mandatory matches the "M" markers from your reference screenshot —
+  // only the 15 always-required top-level fields; conditional sub-fields
+  // (address, shadow trio, exchange ID blocks) are optional even when shown.
+  // optionsSource keys into S.itDetails.dbOptions (the DATABASE tab); static
+  // `options` arrays are for fixed-domain fields (Yes/No) not sheet-sourced.
+  const IT_FIELD_GROUPS = [
+    {
+      aliases: ['UNIQUE NO.', 'UNIQUE NO'],
+      label: 'Unique No.',
+      mandatory: false,
+      type: 'readonly',
+      emptyText: 'Auto-generated on save',
+    },
+    { aliases: ['USER ID'], label: 'User ID', mandatory: true, type: 'text' },
+    { aliases: ['USER NAME'], label: 'User Name', mandatory: true, type: 'text' },
+    {
+      aliases: ['GROUP NAME'],
+      label: 'Group Name',
+      mandatory: true,
+      type: 'search-single',
+      optionsSource: 'groupName',
+    },
+    { aliases: ['USER PAN'], label: 'User PAN', mandatory: true, type: 'text' },
+    {
+      aliases: ['IS PERSON SITTING ON HIS BRANCH'],
+      label: 'Is Person Sitting On His Branch',
+      mandatory: true,
+      type: 'plain',
+      options: ['YES', 'NO'],
+    },
+    {
+      aliases: ['IF YES ADDRESS'],
+      label: 'Address',
+      mandatory: false,
+      type: 'readonly',
+      tall: true,
+    },
+    {
+      aliases: [
+        'IS ID ALLOCATD TO SHADOW USER',
+        'IS ID ALLOCATD TO SHADIW USER',
+        'IS ID ALLOCATED TO SHADOW USER',
+        'IS ID ALLOCATED TO SHADIW USER',
+      ],
+      label: 'Is ID Allocated To Shadow User',
+      mandatory: true,
+      type: 'plain',
+      options: ['YES', 'NO'],
+    },
+    { aliases: ['NAME OF SHADOW USER'], label: 'Name of Shadow User', mandatory: false, type: 'text' },
+    { aliases: ['PHONE NUMBER SHADOW'], label: 'Phone Number (Shadow)', mandatory: false, type: 'text' },
+    { aliases: ['SHADOW CHARGES'], label: 'Shadow Charges', mandatory: false, type: 'text' },
+    {
+      aliases: ['BRANCH SHORT ADDRESS'],
+      label: 'Branch Short Address',
+      mandatory: true,
+      type: 'readonly',
+    },
+    {
+      aliases: ['SEGMENT', 'SEGEMNT'],
+      label: 'Segment',
+      mandatory: true,
+      type: 'plain',
+      optionsSource: 'segment',
+    },
+    {
+      aliases: ['SOFTWARE'],
+      label: 'Software',
+      mandatory: true,
+      type: 'search-single',
+      optionsSource: 'software',
+    },
+    {
+      aliases: ['EXCHANGE ALLOWED IN ID'],
+      label: 'Exchange Allowed In ID',
+      mandatory: true,
+      type: 'search-multi',
+      optionsSource: 'exchange',
+    },
+    {
+      aliases: ['STRATEGY'],
+      label: 'Strategy',
+      mandatory: true,
+      type: 'search-multi',
+      optionsSource: 'strategy',
+    },
+    { aliases: ['EXCEL LICENSE'], label: 'Excel License', mandatory: true, type: 'text' },
+    {
+      aliases: ['CLIENT/PRO', 'CLIENT PRO'],
+      label: 'Client / Pro',
+      mandatory: true,
+      type: 'search-multi',
+      optionsSource: 'clientPro',
+    },
+    {
+      aliases: ['SERVER IP'],
+      label: 'Server IP',
+      mandatory: true,
+      type: 'search-single',
+      optionsSource: 'serverIp',
+    },
+    { aliases: ['DATE OF ISSUE'], label: 'Date of Issue', mandatory: true, type: 'date' },
+
+    // Exchange-ID block. CTCL CM/F&O are formula-derived (see itCtclLookup);
+    // the rest are typed. Show/hide is decided in the layout (renderItFormBody)
+    // via itVisibility() — NOT here — so placement and conditions live together.
+    { aliases: ['NSE CTCL CM'], label: 'NSE CTCL CM', type: 'readonly' },
+    { aliases: ['NSE CTCL F&O'], label: 'NSE CTCL F&O', type: 'readonly' },
+    { aliases: ['NSE 12 DIGIT CM'], label: 'NSE 12 Digit CM', type: 'text' },
+    { aliases: ['NSE 12 DIGIT FO'], label: 'NSE 12 Digit FO', type: 'text' },
+    { aliases: ['BSE CTCL CM'], label: 'BSE CTCL CM', type: 'readonly' },
+    { aliases: ['BSE CTCL F&O'], label: 'BSE CTCL F&O', type: 'readonly' },
+    { aliases: ['BSE 12 DIGIT CM'], label: 'BSE 12 Digit CM', type: 'text' },
+    { aliases: ['BSE 12 DIGIT FO'], label: 'BSE 12 Digit FO', type: 'text' },
+    { aliases: ['MCX CTCL F&O'], label: 'MCX CTCL F&O', type: 'text' },
+    { aliases: ['MCX 12 DIGIT FO'], label: 'MCX 12 Digit FO', type: 'text' },
+    { aliases: ['NCDEX CTCL F&O'], label: 'NCDEX CTCL F&O', type: 'text' },
+    { aliases: ['NCDEX 12 DIGIT FO'], label: 'NCDEX 12 Digit FO', type: 'text' },
+    { aliases: ['NSE COMMODITY CTCL F&O'], label: 'NSE Commodity CTCL F&O', type: 'text' },
+    { aliases: ['NSE COMMODITY 12 DIGIT FO'], label: 'NSE Commodity 12 Digit FO', type: 'text' },
+    { aliases: ['BSE COMMODITY CTCL F&O'], label: 'BSE Commodity CTCL F&O', type: 'text' },
+    { aliases: ['BSE COMMODITY 12 DIGIT FO', 'BSE COMMODITY 12 DIGIT F&O'], label: 'BSE Commodity 12 Digit FO', type: 'text' },
+  ];
+  const IT_FIELD_BY_KEY = {};
+  IT_FIELD_GROUPS.forEach((g) => {
+    IT_FIELD_BY_KEY[g.aliases[0]] = g;
+  });
+
+  // ─── SHOW/HIDE RULES (single source of truth) ────────────────────────────
+  // Returns a map of the current form values into named booleans + a per-field
+  // `hidden` set. The layout reads these to decide what to render; save and
+  // value-clearing read the SAME `hidden` set — so a field is never visible in
+  // one place and treated as hidden in another. Edit a rule once, here.
+  function itVisibility(f) {
+    const seg = itSegment(f);
+    const ex = itSplitCsv(f['EXCHANGE ALLOWED IN ID']);
+    const has = (code) => ex.includes(code);
+    const vis = {
+      shadow: isYesVal(f['IS ID ALLOCATD TO SHADOW USER']),
+      nse: seg === 'F&O' && has('NSE'),
+      bse: seg === 'F&O' && has('BSE'),
+      mcx: seg === 'COMMODITY' && has('MCX'),
+      ncdex: seg === 'COMMODITY' && has('NCDEX'),
+      nseComm: seg === 'COMMODITY' && has('NSE'),
+      bseComm: seg === 'COMMODITY' && has('BSE'),
+    };
+    // Which field key belongs to which rule (drives the `hidden` set below).
+    vis.groups = {
+      shadow: ['NAME OF SHADOW USER', 'PHONE NUMBER SHADOW', 'SHADOW CHARGES'],
+      nse: ['NSE CTCL CM', 'NSE CTCL F&O', 'NSE 12 DIGIT CM', 'NSE 12 DIGIT FO'],
+      bse: ['BSE CTCL CM', 'BSE CTCL F&O', 'BSE 12 DIGIT CM', 'BSE 12 DIGIT FO'],
+      mcx: ['MCX CTCL F&O', 'MCX 12 DIGIT FO'],
+      ncdex: ['NCDEX CTCL F&O', 'NCDEX 12 DIGIT FO'],
+      nseComm: ['NSE COMMODITY CTCL F&O', 'NSE COMMODITY 12 DIGIT FO'],
+      bseComm: ['BSE COMMODITY CTCL F&O', 'BSE COMMODITY 12 DIGIT FO'],
+    };
+    vis.hidden = new Set();
+    Object.keys(vis.groups).forEach((rule) => {
+      if (!vis[rule]) vis.groups[rule].forEach((k) => vis.hidden.add(k));
+    });
+    return vis;
+  }
+
+  function itOptionsFor(g, fields) {
+    const db = S.itDetails.dbOptions || {};
+    if (g.optionsSource === 'exchange') {
+      const raw = db.exchange && db.exchange.length ? db.exchange : ['NSE', 'BSE', 'MCX', 'NCDEX'];
+      const seg = itSegment(fields);
+      const allowed =
+        seg === 'COMMODITY' ? ['NSE', 'BSE', 'MCX', 'NCDEX'] : seg === 'F&O' ? ['NSE', 'BSE'] : [];
+      return raw.filter((o) => allowed.includes(o));
+    }
+    if (g.optionsSource === 'segment') {
+      return db.segment && db.segment.length ? db.segment : ['COMMODITY', 'F&O'];
+    }
+    if (g.optionsSource) return db[g.optionsSource] || [];
+    return g.options || [];
+  }
+
+  function resolveItHeader(aliases) {
+    const headers = S.itDetails.headers || [];
+    for (const a of aliases) {
+      const norm = a.replace(/\s+/g, ' ').trim().toUpperCase();
+      const hit = headers.find((h) => h.replace(/\s+/g, ' ').trim().toUpperCase() === norm);
+      if (hit) return hit;
+    }
+    return aliases[0];
+  }
+  /* ============================= OPEN / STATE ============================= */
+  // Preview of the next Unique No., computed from the currently-loaded rows
+  // (same rule as the server's getNextItUniqueNo_). Shown on the Add form so
+  // the user sees the ID up front; the server still assigns the authoritative
+  // one at save time, so if another record was added meanwhile it self-corrects.
+  function itNextUniqueNo() {
+    const uniqueH = itUniqueNoHeader();
+    let max = 0;
+    (S.itDetails.rows || []).forEach((r) => {
+      const m = String(r[uniqueH] || '')
+        .trim()
+        .match(/^UNI-(\d+)$/i);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    });
+    return 'UNI-' + (max + 1);
+  }
+  function openItDetailsForm(mode) {
+    S.itForm = {
+      open: true,
+      mode,
+      pickUniqueNo: '',
+      // Add starts with today + a previewed Unique No.; Edit starts blank until
+      // the user picks a record from the Unique No. dropdown (which prefills).
+      fields:
+        mode === 'add' ? { 'DATE OF ISSUE': itTodayFormatted(), 'UNIQUE NO.': itNextUniqueNo() } : {},
+      surrender: 'NO', // edit only: YES => cancel the record + stamp AY/AZ, no new version
+      showErrors: false,
+      saving: false,
+      error: '',
+      pickerOpen: null,
+      pickerQuery: '',
+      regPicked: '',
+      regOpen: false,
+      regQuery: '',
+      editPickOpen: false,
+      editPickQuery: '',
+    };
+    render();
+  }
+  function closeItDetailsForm() {
+    S.itForm = null;
+    render();
+  }
+  function itUniqueNoHeader() {
+    return resolveItHeader(['UNIQUE NO.', 'UNIQUE NO']);
+  }
+  function itStatusHeader() {
+    return resolveItHeader(['STATUS']);
+  }
+  function itActiveRecords() {
+    const statusH = itStatusHeader(),
+      uniqueH = itUniqueNoHeader(),
+      userIdH = resolveItHeader(['USER ID']);
+    return (S.itDetails.rows || []).filter(
+      (r) =>
+        String(r[statusH] || '')
+          .trim()
+          .toUpperCase() === 'ACTIVE' &&
+        String(r[uniqueH] || '').trim() &&
+        String(r[userIdH] || '').trim()
+    );
+  }
+  function pickItRecordForEdit(uniqueNo) {
+    const uniqueH = itUniqueNoHeader();
+    const row = itActiveRecords().find((r) => String(r[uniqueH]).trim() === String(uniqueNo).trim());
+    if (!row) return;
+    const fields = Object.assign({}, row); // baseline: passthrough every real header
+    IT_FIELD_GROUPS.forEach((g) => {
+      fields[g.aliases[0]] = row[resolveItHeader(g.aliases)] || '';
+    });
+    S.itForm.fields = fields;
+    S.itForm.pickUniqueNo = uniqueNo;
+    // Formula fields are always current, not a historical snapshot — recompute
+    // them from today's DATABASE/Branch Address Formula tabs, same as a live
+    // sheet formula would when you reopen the row.
+    applyItBranchLookup();
+    applyItCtclLookups();
+    render();
+  }
+
+  /* ===================== EDIT: pick a record by Unique No. =====================
+     In Edit mode the Unique No. field is a searchable dropdown of existing
+     ACTIVE records (keyed by the unique UNI- id, since a User ID may span
+     several records). Choosing one prefills the whole form via
+     pickItRecordForEdit; save then versions it (old -> CANCEL, new -> ACTIVE). */
+  function onEditPickToggle() {
+    if (!S.itForm) return;
+    S.itForm.editPickOpen = !S.itForm.editPickOpen;
+    S.itForm.editPickQuery = '';
+    render();
+    if (S.itForm.editPickOpen) {
+      const inp = document.querySelector('.sp-wrap[data-editpick="1"] .sp-search');
+      if (inp) inp.focus();
+    }
+  }
+  function onEditPickChoose(uniqueNo) {
+    if (!S.itForm) return;
+    S.itForm.editPickOpen = false;
+    S.itForm.showErrors = false;
+    pickItRecordForEdit(uniqueNo); // sets fields + pickUniqueNo, applies lookups, renders
+  }
+  function renderEditRecordPicker() {
+    const F = S.itForm;
+    const uniqueH = itUniqueNoHeader(),
+      userIdH = resolveItHeader(['USER ID']),
+      nameH = resolveItHeader(['USER NAME']);
+    const records = itActiveRecords();
+    const query = F.editPickOpen ? F.editPickQuery || '' : '';
+    const filtered = query
+      ? records.filter((r) =>
+          `${r[uniqueH] || ''} ${r[userIdH] || ''} ${r[nameH] || ''}`
+            .toLowerCase()
+            .includes(query.toLowerCase())
+        )
+      : records;
+    return `<div class="sp-wrap" data-editpick="1">
+      <button type="button" class="sp-trigger" data-action="editpick-toggle">
+        ${F.pickUniqueNo ? `<span class="sp-trigger-label">${esc(F.pickUniqueNo)}</span>` : `<span class="sp-placeholder">Choose Unique No…</span>`}<span class="sp-caret">▾</span>
+      </button>
+      ${
+        F.editPickOpen
+          ? `<div class="sp-panel">
+        <input type="text" class="sp-search" data-action="editpick-search" placeholder="Search Unique No / User ID…" value="${esc(query)}">
+        <div class="sp-options">${filtered.length ? filtered.map((r) => `<div class="sp-option ${F.pickUniqueNo === String(r[uniqueH]) ? 'selected' : ''}" data-action="editpick-choose" data-unique="${esc(r[uniqueH])}"><span class="sp-check">${F.pickUniqueNo === String(r[uniqueH]) ? '✓' : ''}</span>${esc(r[uniqueH])} · ${esc(r[userIdH] || '')}</div>`).join('') : '<div class="sp-empty">No active records</div>'}</div>
+      </div>`
+          : ''
+      }
+    </div>`;
+  }
+
+  /* ============================= FORMULA LOOKUPS ============================= */
+  // Mirrors: =IFERROR(VLOOKUP($C$6,'Branch Address Formula'!$A:$B/$C,2/3,0),"")
+  // $C$6 in the old sheet == GROUP NAME in this form.
+  function itBranchLookup(groupName) {
+    const rows = (S.itDetails.dbOptions && S.itDetails.dbOptions.branchAddress) || [];
+    const key = String(groupName || '')
+      .trim()
+      .toUpperCase();
+    if (!key) return null;
+    return (
+      rows.find(
+        (r) =>
+          String(r.key || '')
+            .trim()
+            .toUpperCase() === key
+      ) || null
+    );
+  }
+  function applyItBranchLookup() {
+    if (!S.itForm) return;
+    const hit = itBranchLookup(S.itForm.fields['GROUP NAME']);
+    S.itForm.fields['BRANCH SHORT ADDRESS'] = hit ? hit.shortAddress : '';
+    S.itForm.fields['IF YES ADDRESS'] = hit ? hit.fullAddress : '';
+  }
+  // Mirrors: =ArrayFormula(IFERROR(VLOOKUP(<ip>&"<EXCHANGE>",{DATABASE!I:I&DATABASE!H:H,DATABASE!J:K},2/3,0)))
+  // Server IP is multi-select for data entry, but the formula only ever had
+  // one IP to key on — the first selected IP drives this lookup.
+  function itCtclLookup(ip, exchange) {
+    const rows = (S.itDetails.dbOptions && S.itDetails.dbOptions.ctclLookup) || [];
+    const ipN = String(ip || '')
+        .trim()
+        .toUpperCase(),
+      exN = String(exchange || '')
+        .trim()
+        .toUpperCase();
+    if (!ipN || !exN) return null;
+    return (
+      rows.find(
+        (r) =>
+          String(r.ip || '')
+            .trim()
+            .toUpperCase() === ipN &&
+          String(r.exchange || '')
+            .trim()
+            .toUpperCase() === exN
+      ) || null
+    );
+  }
+  function applyItCtclLookups() {
+    if (!S.itForm) return;
+    const firstIp = itSplitCsv(S.itForm.fields['SERVER IP'])[0] || '';
+    ['NSE', 'BSE'].forEach((ex) => {
+      const hit = itCtclLookup(firstIp, ex);
+      S.itForm.fields[`${ex} CTCL CM`] = hit ? hit.ctclCm : '';
+      S.itForm.fields[`${ex} CTCL F&O`] = hit ? hit.ctclFo : '';
+    });
+  }
+
+  /* ============================= INPUT ============================= */
+  // Defensive sweep: any field the current rules hide is not mandatory and must
+  // never carry a stale value into save — even if it held one earlier (e.g.
+  // typed while one Segment/Exchange was selected, then that selection changed).
+  // Uses the SAME itVisibility().hidden set the layout uses, so shown == saved.
+  function itClearHiddenFields() {
+    if (!S.itForm) return;
+    const fields = S.itForm.fields;
+    itVisibility(fields).hidden.forEach((key) => {
+      fields[key] = '';
+    });
+  }
+  function onItFieldInput(el) {
+    if (!S.itForm) return;
+    const key = el.getAttribute('data-itfield');
+    if (!key) return;
+    let value = el.value;
+    // Phone fields: allow digits only, cap at 10, reflect the strip in the DOM.
+    if (el.hasAttribute('data-itphone')) {
+      value = value.replace(/\D/g, '').slice(0, 10);
+      if (value !== el.value) {
+        const pos = el.selectionStart;
+        el.value = value;
+        try { el.setSelectionRange(pos - 1, pos - 1); } catch (e) {}
+      }
+      S.itForm.fields[key] = value;
+      // Toggle the error state live as they reach / leave a valid 10 digits.
+      if (value.length === 10) el.classList.remove('cell-error');
+      else if (value.length > 0) el.classList.add('cell-error');
+      else el.classList.remove('cell-error');
+      return;
+    }
+    S.itForm.fields[key] = value;
+    if (el.classList.contains('cell-error') && value) el.classList.remove('cell-error');
+    if (key === 'IS ID ALLOCATD TO SHADOW USER') {
+      itClearHiddenFields(); // blanks the shadow trio the instant it's hidden
+      render();
+      return;
+    }
+    if (key === 'SEGMENT') {
+      S.itForm.fields['EXCHANGE ALLOWED IN ID'] = ''; // reset dependent exchange picks
+      itClearHiddenFields();
+      render();
+      return;
+    }
+    // plain text/other fields: state already updated, DOM already reflects
+    // what was typed — no re-render needed.
+  }
+  function onItSelectPick(el) {
+    if (!S.itForm) return;
+    const key = el.getAttribute('data-sp');
+    const val = el.getAttribute('data-val');
+    const g = IT_FIELD_BY_KEY[key];
+    if (!g) return;
+    if (g.type === 'search-multi') {
+      const cur = itSplitCsv(S.itForm.fields[key]);
+      const next = cur.includes(val) ? cur.filter((v) => v !== val) : cur.concat([val]);
+      S.itForm.fields[key] = next.join(',');
+    } else {
+      S.itForm.fields[key] = val;
+      S.itForm.pickerOpen = null;
+    }
+    if (key === 'GROUP NAME') applyItBranchLookup();
+    if (key === 'SERVER IP') applyItCtclLookups();
+    if (key === 'EXCHANGE ALLOWED IN ID') itClearHiddenFields();
+    render();
+  }
+  function onItSpToggle(key) {
+    if (!S.itForm) return;
+    S.itForm.pickerOpen = S.itForm.pickerOpen === key ? null : key;
+    S.itForm.pickerQuery = '';
+    render();
+    if (S.itForm.pickerOpen === key) {
+      const inp = document.querySelector(`.sp-wrap[data-sp="${key}"] .sp-search`);
+      if (inp) inp.focus();
+    }
+  }
+  // Clear a SelectPicker's selection (the ✕ on the trigger). Re-runs the same
+  // dependent effects a normal pick would, so lookups/visibility stay in sync.
+  function onItSpClear(key) {
+    if (!S.itForm) return;
+    S.itForm.fields[key] = '';
+    S.itForm.pickerOpen = null;
+    if (key === 'GROUP NAME') applyItBranchLookup();
+    if (key === 'SERVER IP') applyItCtclLookups();
+    if (key === 'EXCHANGE ALLOWED IN ID') itClearHiddenFields();
+    render();
+  }
+
+  /* ============================= REGISTER LOOKUP (right card) =============================
+     Search + single-select a User ID (reuses the same SelectPicker pattern
+     as GROUP NAME etc.), then show that one record transposed — field name
+     down column A, its value in column B, mirroring the sheet's own
+     Field/Value reference layout. Only rows with a real Unique No. AND a
+     real User ID are ever eligible (skips blank/incomplete sheet rows). */
+  // One entry per UNIQUE User ID (a user can have many rows — the edit history
+  // of ACTIVE + CANCEL versions). We keep the ACTIVE row for each User ID (or
+  // the last seen if none is active), so the dropdown lists each User ID once.
+  function itRegisterUsers() {
+    const uniqueH = itUniqueNoHeader(),
+      userIdH = resolveItHeader(['USER ID']),
+      statusH = itStatusHeader(),
+      nameH = resolveItHeader(['USER NAME']);
+    const byId = {};
+    (S.itDetails.rows || []).forEach((r) => {
+      const id = String(r[userIdH] || '').trim();
+      const uni = String(r[uniqueH] || '').trim();
+      if (!id || !uni) return; // skip blank/incomplete rows
+      const active = String(r[statusH] || '').trim().toUpperCase() === 'ACTIVE';
+      if (!byId[id] || active) byId[id] = { userId: id, name: String(r[nameH] || ''), row: r };
+    });
+    return Object.keys(byId)
+      .sort()
+      .map((id) => byId[id]);
+  }
+  // Only the ACTIVE rows for one User ID (STATUS column = ACTIVE) — the
+  // CANCEL history is excluded. A User ID can still have several ACTIVE
+  // records, so the panel may show more than one column.
+  function itRegisterRowsFor(userId) {
+    const uniqueH = itUniqueNoHeader(),
+      userIdH = resolveItHeader(['USER ID']),
+      statusH = itStatusHeader();
+    return (S.itDetails.rows || [])
+      .filter(
+        (r) =>
+          String(r[userIdH] || '').trim() === String(userId).trim() &&
+          String(r[uniqueH] || '').trim() &&
+          String(r[statusH] || '').trim().toUpperCase() === 'ACTIVE'
+      )
+      .sort((a, b) => String(a[uniqueH] || '').localeCompare(String(b[uniqueH] || '')));
+  }
+  function onRegToggle() {
+    if (!S.itForm) return;
+    S.itForm.regOpen = !S.itForm.regOpen;
+    S.itForm.regQuery = '';
+    render();
+    if (S.itForm.regOpen) {
+      const inp = document.querySelector('.sp-wrap[data-reg="1"] .sp-search');
+      if (inp) inp.focus();
+    }
+  }
+  function onRegPick(userId) {
+    if (!S.itForm) return;
+    S.itForm.regPicked = userId; // now keyed by User ID, not Unique No.
+    S.itForm.regOpen = false;
+    render();
+  }
+  function onRegClear() {
+    if (!S.itForm) return;
+    S.itForm.regPicked = '';
+    S.itForm.regOpen = false;
+    render();
+  }
+  function renderItRegisterPicker() {
+    const F = S.itForm;
+    const users = itRegisterUsers();
+    const query = F.regOpen ? F.regQuery || '' : '';
+    const filtered = query
+      ? users.filter((u) => `${u.userId} ${u.name}`.toLowerCase().includes(query.toLowerCase()))
+      : users;
+    const picked = F.regPicked ? users.find((u) => u.userId === F.regPicked) : null;
+    return `<div class="sp-wrap" data-reg="1">
+      <button type="button" class="sp-trigger" data-action="reg-toggle">
+        ${picked ? `<span class="sp-trigger-label">${esc(picked.userId)}</span>` : `<span class="sp-placeholder">Search User ID…</span>`}
+        ${picked ? `<span class="sp-clear" data-action="reg-clear" title="Clear">✕</span>` : ''}
+        <span class="sp-caret">▾</span>
+      </button>
+      ${
+        F.regOpen
+          ? `<div class="sp-panel">
+        <input type="text" class="sp-search" data-action="reg-search" placeholder="Search User ID…" value="${esc(query)}">
+        <div class="sp-options">${filtered.length ? filtered.map((u) => `<div class="sp-option ${F.regPicked === u.userId ? 'selected' : ''}" data-action="reg-pick" data-unique="${esc(u.userId)}"><span class="sp-check">${F.regPicked === u.userId ? '✓' : ''}</span>${esc(u.userId)}</div>`).join('') : '<div class="sp-empty">No matches</div>'}</div>
+      </div>`
+          : ''
+      }
+    </div>`;
+  }
+  function renderItRegisterTable() {
+    const F = S.itForm;
+    const statusH = itStatusHeader();
+    const rows = F.regPicked ? itRegisterRowsFor(F.regPicked) : [];
+    // Field labels down column A, then ONE column per saved row for this User ID
+    // (a user with 2 versions shows 2 value columns). No header row — the Status
+    // + Unique No. rows already identify each column. Long values (addresses)
+    // wrap onto multiple lines at word boundaries; title keeps the full text.
+    const fields = [{ label: 'Status', header: statusH }].concat(
+      IT_FIELD_GROUPS.map((g) => ({ label: g.label, header: resolveItHeader(g.aliases) }))
+    );
+    const body = fields
+      .map((f) => {
+        const cells = rows.length
+          ? rows
+              .map((r) => {
+                const v = String(r[f.header] || '');
+                return `<td><div class="itreg-val" title="${esc(v)}">${esc(v)}</div></td>`;
+              })
+              .join('')
+          : '<td></td>';
+        return `<tr><th>${esc(f.label)}</th>${cells}</tr>`;
+      })
+      .join('');
+    return `<div class="itreg-scroll">
+      <table class="itreg-table">
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+  }
+
+  /* ============================= RENDER ============================= */
+  function renderSelectPicker(g, fields) {
+    const key = g.aliases[0];
+    const multi = g.type === 'search-multi';
+    const options = itOptionsFor(g, fields);
+    const rawVal = fields[key] || '';
+    const selected = multi ? itSplitCsv(rawVal) : rawVal ? [rawVal] : [];
+    const isOpen = S.itForm.pickerOpen === key;
+    const query = isOpen ? S.itForm.pickerQuery || '' : '';
+    const filtered = query
+      ? options.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
+      : options;
+    const isErr = S.itForm.showErrors && g.mandatory && !selected.length;
+
+    let triggerInner;
+    if (!selected.length) {
+      triggerInner = `<span class="sp-placeholder">Select…</span>`;
+    } else if (multi) {
+      const shown = selected.slice(0, 3);
+      const extra = selected.length - shown.length;
+      triggerInner = `<div class="sp-trigger-chips">${shown.map((s) => `<span class="sp-chip">${esc(s)}</span>`).join('')}${extra > 0 ? `<span class="sp-chip sp-chip-more">+${extra}</span>` : ''}</div>`;
+    } else {
+      triggerInner = `<span class="sp-trigger-label">${esc(selected[0])}</span>`;
+    }
+
+    return `<div class="sp-wrap" data-sp="${key}">
+      <button type="button" class="sp-trigger ${isErr ? 'cell-error' : ''}" data-action="sp-toggle" data-sp="${key}">
+        ${triggerInner}
+        ${selected.length ? `<span class="sp-clear" data-action="sp-clear" data-sp="${key}" title="Clear">✕</span>` : ''}
+        <span class="sp-caret">▾</span>
+      </button>
+      ${
+        isOpen
+          ? `<div class="sp-panel">
+        <input type="text" class="sp-search" data-action="sp-search" data-sp="${key}" placeholder="Search…" value="${esc(query)}">
+        <div class="sp-options">${filtered.length ? filtered.map((o) => `<div class="sp-option ${selected.includes(o) ? 'selected' : ''}" data-action="sp-pick" data-sp="${key}" data-val="${esc(o)}"><span class="sp-check">${selected.includes(o) ? '✓' : ''}</span>${esc(o)}</div>`).join('') : '<div class="sp-empty">No matches</div>'}</div>
+      </div>`
+          : ''
+      }
+    </div>`;
+  }
+
+  // ─── ELEMENT BUILDERS ────────────────────────────────────────────────────
+  // Each returns one complete <div class="itf-cell"> with a real element. The
+  // HTML form below calls these directly — no metadata loop, no type dispatch.
+  function itLbl_(label, mand) {
+    return `<label>${esc(label)}${mand ? ' <span class="req-star">*</span>' : ''}</label>`;
+  }
+  function itErr_(key, mand) {
+    return S.itForm.showErrors && mand && !String(S.itForm.fields[key] || '').trim() ? 'cell-error' : '';
+  }
+  // <input type=text> — placeholder defaults to "Enter <label>".
+  function fText(key, label, mand, placeholder) {
+    const ph = placeholder != null ? placeholder : `Enter ${label}`;
+    return `<div class="itf-cell">${itLbl_(label, mand)}<input type="text" class="${itErr_(key, mand)}" data-itfield="${esc(key)}" value="${esc(S.itForm.fields[key] || '')}" autocomplete="off" placeholder="${esc(ph)}"></div>`;
+  }
+  // 10-digit mobile number. Input is constrained to digits (max 10) live; the
+  // error only shows after a save attempt or once the field is non-empty-invalid.
+  function itPhoneInvalid(key) {
+    const v = String(S.itForm.fields[key] || '').trim();
+    return v.length > 0 && v.length !== 10;
+  }
+  function fPhone(key, label, mand) {
+    // Input is digits-only + capped at 10, so the only invalid state is a
+    // partial number — flag it live (and it also blocks save).
+    const bad = itPhoneInvalid(key);
+    return `<div class="itf-cell">${itLbl_(label, mand)}<input type="text" inputmode="numeric" maxlength="10" class="${bad ? 'cell-error' : ''}" data-itfield="${esc(key)}" data-itphone="1" value="${esc(S.itForm.fields[key] || '')}" autocomplete="off" placeholder="10-digit mobile">${bad ? `<div class="field-err-hint">Enter a valid 10-digit number</div>` : ''}</div>`;
+  }
+  // native <select> (options = plain array)
+  function fSelect(key, label, mand, options) {
+    const cur = S.itForm.fields[key] || '';
+    const opts = options.map((o) => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('');
+    return `<div class="itf-cell">${itLbl_(label, mand)}<select class="${itErr_(key, mand)}" data-itfield="${esc(key)}"><option value="">Select…</option>${opts}</select></div>`;
+  }
+  // read-only (formula-derived) display cell
+  function fReadonly(key, label, mand, opt) {
+    opt = opt || {};
+    const v = S.itForm.fields[key] || '';
+    const err = S.itForm.showErrors && mand && !String(v).trim() ? 'cell-error' : '';
+    return `<div class="itf-cell">${itLbl_(label, mand)}<div class="cell-ro ${opt.tall ? 'cell-ro-tall' : ''} ${err}" data-itfield-ro="${esc(key)}">${v ? esc(v) : esc(opt.empty || '—')}</div></div>`;
+  }
+  // date input (flatpickr)
+  function fDate(key, label, mand) {
+    return `<div class="itf-cell">${itLbl_(label, mand)}<input type="text" class="flatpickr-alt ${itErr_(key, mand)}" id="itDateOfIssue" data-itfield="${esc(key)}" value="${esc(S.itForm.fields[key] || '')}" placeholder="Select date…" readonly></div>`;
+  }
+  // SelectPicker widget (search-single / search-multi). Its multi/options config
+  // comes from IT_FIELD_BY_KEY — the field registry — so the widget stays in
+  // sync with save/edit without re-declaring it in the layout.
+  function fPicker(key, label, mand) {
+    return `<div class="itf-cell">${itLbl_(label, mand)}${renderSelectPicker(IT_FIELD_BY_KEY[key], S.itForm.fields)}</div>`;
+  }
+
+  // ─── FORM LAYOUT (edit here) ─────────────────────────────────────────────
+  // The form's actual HTML. Each line is a real element — fText / fSelect /
+  // fPicker / fDate / fReadonly — so you can see and rearrange every field.
+  // Conditional fields carry their show/hide right here (`vis.<rule> ? … : ''`),
+  // and `vis` comes from itVisibility() so what's shown is exactly what's saved.
+  function renderItFormBody() {
+    const f = S.itForm.fields;
+    const vis = itVisibility(f);
+    const YESNO = ['YES', 'NO'];
+    const segOptions = itOptionsFor({ optionsSource: 'segment' }, f);
+    // Unique No.: Add shows the previewed (auto) id read-only; Edit shows a
+    // dropdown of existing records to pick + prefill from.
+    const uniqueCell =
+      S.itForm.mode === 'edit'
+        ? `<div class="itf-cell">${itLbl_('Unique No.', true)}${renderEditRecordPicker()}</div>`
+        : fReadonly('UNIQUE NO.', 'Unique No.', false, { empty: 'Auto-generated on save' });
+    // Edit only: Surrender. NO = normal update; YES = cancel this record and stamp
+    // the surrender timestamp/flag (no new version is created).
+    const surrender = S.itForm.surrender === 'YES' ? 'YES' : 'NO';
+    const surrenderCell =
+      S.itForm.mode === 'edit' && S.itForm.pickUniqueNo
+        ? `<div class="itf-cell"><label>Surrender</label>
+             <select data-itsurrender class="${surrender === 'YES' ? 'it-surrender-on' : ''}">
+               <option value="NO" ${surrender === 'NO' ? 'selected' : ''}>NO</option>
+               <option value="YES" ${surrender === 'YES' ? 'selected' : ''}>YES</option>
+             </select>
+             ${surrender === 'YES' ? '<div class="it-surrender-note">Marks record <b>CANCELLED / SURRENDERED</b> — no new version.</div>' : ''}
+           </div>`
+        : '';
+    return `<div class="itform-2col">
+      <div class="itform-col">
+        ${uniqueCell}
+        ${surrenderCell}
+        ${fText('USER ID', 'User ID', true)}
+        ${fText('USER NAME', 'User Name', true)}
+        ${fPicker('GROUP NAME', 'Group Name', true)}
+        ${fText('USER PAN', 'User PAN', true)}
+        ${fSelect('IS PERSON SITTING ON HIS BRANCH', 'Is Person Sitting On His Branch', true, YESNO)}
+        ${fReadonly('IF YES ADDRESS', 'Address', false, { tall: true })}
+        ${fSelect('IS ID ALLOCATD TO SHADOW USER', 'Is ID Allocated To Shadow User', true, YESNO)}
+        ${vis.shadow ? fText('NAME OF SHADOW USER', 'Name of Shadow User', false) : ''}
+        ${vis.shadow ? fPhone('PHONE NUMBER SHADOW', 'Phone Number (Shadow)', false) : ''}
+        ${vis.shadow ? fText('SHADOW CHARGES', 'Shadow Charges', false) : ''}
+      </div>
+      <div class="itform-col">
+        ${fReadonly('BRANCH SHORT ADDRESS', 'Branch Short Address', true)}
+        ${fSelect('SEGMENT', 'Segment', true, segOptions)}
+        ${fPicker('SOFTWARE', 'Software', true)}
+        ${fPicker('EXCHANGE ALLOWED IN ID', 'Exchange Allowed In ID', true)}
+        ${fPicker('STRATEGY', 'Strategy', true)}
+        ${fText('EXCEL LICENSE', 'Excel License', true)}
+        ${fPicker('CLIENT/PRO', 'Client / Pro', true)}
+        ${fPicker('SERVER IP', 'Server IP', true)}
+        ${fDate('DATE OF ISSUE', 'Date of Issue', true)}
+        ${vis.nse ? fReadonly('NSE CTCL CM', 'NSE CTCL CM', false) : ''}
+        ${vis.nse ? fReadonly('NSE CTCL F&O', 'NSE CTCL F&O', false) : ''}
+        ${vis.nse ? fText('NSE 12 DIGIT CM', 'NSE 12 Digit CM', false) : ''}
+        ${vis.nse ? fText('NSE 12 DIGIT FO', 'NSE 12 Digit FO', false) : ''}
+        ${vis.bse ? fReadonly('BSE CTCL CM', 'BSE CTCL CM', false) : ''}
+        ${vis.bse ? fReadonly('BSE CTCL F&O', 'BSE CTCL F&O', false) : ''}
+        ${vis.bse ? fText('BSE 12 DIGIT CM', 'BSE 12 Digit CM', false) : ''}
+        ${vis.bse ? fText('BSE 12 DIGIT FO', 'BSE 12 Digit FO', false) : ''}
+        ${vis.mcx ? fText('MCX CTCL F&O', 'MCX CTCL F&O', false) : ''}
+        ${vis.mcx ? fText('MCX 12 DIGIT FO', 'MCX 12 Digit FO', false) : ''}
+        ${vis.ncdex ? fText('NCDEX CTCL F&O', 'NCDEX CTCL F&O', false) : ''}
+        ${vis.ncdex ? fText('NCDEX 12 DIGIT FO', 'NCDEX 12 Digit FO', false) : ''}
+        ${vis.nseComm ? fText('NSE COMMODITY CTCL F&O', 'NSE Commodity CTCL F&O', false) : ''}
+        ${vis.nseComm ? fText('NSE COMMODITY 12 DIGIT FO', 'NSE Commodity 12 Digit FO', false) : ''}
+        ${vis.bseComm ? fText('BSE COMMODITY CTCL F&O', 'BSE Commodity CTCL F&O', false) : ''}
+        ${vis.bseComm ? fText('BSE COMMODITY 12 DIGIT FO', 'BSE Commodity 12 Digit FO', false) : ''}
+      </div>
+    </div>`;
+  }
+
+  function renderItFormPage() {
+    const F = S.itForm;
+    const title = F.mode === 'edit' ? `Edit IT Detail — ${esc(F.pickUniqueNo)}` : 'Add IT Detail';
+    return `<div class="itform-row">
+      <div class="itform-page itform-formcard">
+        <div class="itform-head"><button class="btn btn-ghost" data-action="close-it-form">← Back to list</button><h2>${title}</h2></div>
+        <div class="itform-body">
+          ${F.error ? `<div class="modal-error">${esc(F.error)}</div>` : ''}
+          ${renderItFormBody()}
+        </div>
+        <div class="itform-foot">
+          <button class="btn btn-ghost" data-action="close-it-form">Cancel</button>
+          <button class="btn btn-gold" data-action="save-it-form" ${F.saving ? 'disabled' : ''}>${F.saving ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Saving…' : 'Save'}</button>
+        </div>
+      </div>
+      <div class="itform-page itform-regcard">
+        <div class="itform-head">
+          <h2>Existing Records</h2>
+          <div class="itreg-picker">${renderItRegisterPicker()}</div>
+        </div>
+        <div class="itform-regbody">${renderItRegisterTable()}</div>
+      </div>
+    </div>`;
+  }
+
+  function renderItDetailsFormPage() {
+    if (!S.itForm || !S.itForm.open) return '';
+    return renderItFormPage();
+  }
+
+  function initItDatePicker() {
+    const el = document.getElementById('itDateOfIssue');
+    if (!el || typeof flatpickr === 'undefined') return;
+    flatpickr(el, {
+      dateFormat: 'd-M-Y',
+      allowInput: false,
+      disableMobile: true,
+      defaultDate: S.itForm.fields['DATE OF ISSUE'] || null,
+      onChange: function (sel, ds) {
+        if (S.itForm) S.itForm.fields['DATE OF ISSUE'] = ds;
+      },
+    });
+  }
+
+  /* ============================= SAVE ============================= */
+  // Sync the just-saved record into the local table data (S.itDetails.rows) so
+  // the IT Details list reflects it instantly — no dependency on a re-fetch of
+  // the external project Sheet (which can be slow or fail). result.row is keyed
+  // by the real sheet headers, the same shape rows already have.
+  //  - add : append the new ACTIVE row.
+  //  - edit: flip the previous ACTIVE row(s) for this Unique No. to CANCEL
+  //          (mirrors what the server did), then append the new ACTIVE row.
+  // A later Refresh / reload still pulls the authoritative data from the sheet.
+  function applyItSaveToLocal(mode, uniqueNo, row) {
+    if (!row) return;
+    if (!Array.isArray(S.itDetails.rows)) S.itDetails.rows = [];
+    if (mode === 'edit') {
+      const statusH = itStatusHeader(),
+        uniqueH = itUniqueNoHeader();
+      const target = String(uniqueNo || '').trim();
+      S.itDetails.rows.forEach((r) => {
+        if (
+          String(r[uniqueH] || '').trim() === target &&
+          String(r[statusH] || '').trim().toUpperCase() === 'ACTIVE'
+        ) {
+          r[statusH] = 'CANCEL';
+        }
+      });
+    }
+    S.itDetails.rows.push(row);
+  }
+
+  // Surrender: cancel the active local row(s) + stamp surrender status/timestamp;
+  // no new row is added.
+  function applyItSurrenderLocal(uniqueNo, row) {
+    if (!Array.isArray(S.itDetails.rows)) return;
+    const statusH = itStatusHeader(),
+      uniqueH = itUniqueNoHeader(),
+      surrTsH = resolveItHeader(['SURRENDER TIMESTAMP']),
+      surrStH = resolveItHeader(['SURRENDER STATUS']);
+    const target = String(uniqueNo || '').trim();
+    S.itDetails.rows.forEach((r) => {
+      if (
+        String(r[uniqueH] || '').trim() === target &&
+        String(r[statusH] || '').trim().toUpperCase() === 'ACTIVE'
+      ) {
+        r[statusH] = 'CANCEL';
+        if (surrTsH && row && row[surrTsH] !== undefined) r[surrTsH] = row[surrTsH];
+        if (surrStH) r[surrStH] = 'YES';
+      }
+    });
+  }
+
+  async function saveItDetailsForm() {
+    const F = S.itForm;
+    if (!F) return;
+    // Edit mode: a record must be chosen first (that's what we version).
+    if (F.mode === 'edit' && !F.pickUniqueNo) {
+      F.error = 'Choose a record (Unique No.) to edit first.';
+      render();
+      return;
+    }
+    // Belt-and-suspenders: whatever triggered a field to be hidden, never
+    // let a stale value from before it was hidden reach the sheet.
+    itClearHiddenFields();
+    const missing = IT_FIELD_GROUPS.some(
+      (g) => g.mandatory && !String(F.fields[g.aliases[0]] || '').trim()
+    );
+    if (missing) {
+      F.showErrors = true;
+      F.error = 'Please fill all required fields.';
+      render();
+      return;
+    }
+    // Shadow phone (when shown) must be a full 10-digit number.
+    if (itPhoneInvalid('PHONE NUMBER SHADOW')) {
+      F.showErrors = true;
+      F.error = 'Phone Number (Shadow) must be a 10-digit number.';
+      render();
+      return;
+    }
+    F.error = '';
+    F.saving = true;
+    render();
+    showSavingOverlay('Saving IT Detail…');
+    try {
+      const outgoing = Object.assign({}, F.fields); // baseline: passthrough real-header keys (edit mode)
+      IT_FIELD_GROUPS.forEach((g) => {
+        outgoing[resolveItHeader(g.aliases)] = F.fields[g.aliases[0]] || '';
+      });
+      const result = await runServer('saveItDetailsEntry', {
+        mode: F.mode,
+        uniqueNo: F.pickUniqueNo,
+        fields: outgoing,
+        surrender: F.mode === 'edit' && F.surrender === 'YES' ? 'YES' : 'NO',
+        loginId: S.user.id,
+      });
+      hideSavingOverlay();
+      if (!result || result.status !== 'ok') {
+        F.saving = false;
+        F.error = (result && result.message) || 'Save failed.';
+        render();
+        return;
+      }
+      // Update the local table data straight from the save result — instant,
+      // and immune to a project-Sheet re-fetch failing. The next Refresh /
+      // reload will still reconcile with the authoritative sheet data.
+      if (result.surrendered) applyItSurrenderLocal(F.pickUniqueNo, result.row);
+      else applyItSaveToLocal(F.mode, F.pickUniqueNo, result.row);
+      closeItDetailsForm(); // clears the form + re-renders the (now-updated) table
+      showToast(result.surrendered ? 'Record surrendered (cancelled).' : 'IT Detail saved successfully.', false);
+    } catch (err) {
+      hideSavingOverlay();
+      F.saving = false;
+      F.error = err.message;
+      render();
+    }
+  }
+</script>

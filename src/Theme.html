@@ -1,0 +1,169 @@
+<!-- ═══ Theme.html — appearance engine (display mode + accent color scheme) ═══
+     Included in <head> so it applies BEFORE the app paints (no flash). The
+     server injects window.__APPEARANCE__ = { mode, accent }. Everything the app
+     colours reads the CSS custom properties this sets, so the whole UI + login
+     page recolour together. Functions are global so Common.html can reuse them. -->
+<script>
+  (function () {
+    // Accent palette. Each scheme is a UNIQUE two-colour gradient: `hex` is the
+    // primary accent that drives the whole app (buttons/active/borders/text),
+    // `hex2` is the gradient partner (swatch + button/logo gradient).
+    window.ACCENT_SCHEMES = [
+      { key: 'orange', label: 'Orange', hex: '#ff7d29', hex2: '#ff5e3a' },
+      { key: 'sunset', label: 'Sunset', hex: '#f97316', hex2: '#ec4899' },
+      { key: 'amber', label: 'Amber Forge', hex: '#f59e0b', hex2: '#ef4444' },
+      { key: 'gold', label: 'Gold Luxe', hex: '#d4a017', hex2: '#f59e0b' },
+      { key: 'crimson', label: 'Crimson Edge', hex: '#e11d48', hex2: '#f97316' },
+      { key: 'ruby', label: 'Ruby', hex: '#be123c', hex2: '#f43f5e' },
+      { key: 'rose', label: 'Rose Quartz', hex: '#f43f5e', hex2: '#fb7185' },
+      { key: 'berry', label: 'Berry Punch', hex: '#db2777', hex2: '#e11d48' },
+      { key: 'pink', label: 'Pink', hex: '#ec4899', hex2: '#f472b6' },
+      { key: 'fuchsia', label: 'Fuchsia Bloom', hex: '#c026d3', hex2: '#ec4899' },
+      { key: 'plum', label: 'Plum', hex: '#9333ea', hex2: '#c026d3' },
+      { key: 'violet', label: 'Violet Night', hex: '#7c3aed', hex2: '#a855f7' },
+      { key: 'indigo', label: 'Indigo Wave', hex: '#4f46e5', hex2: '#6366f1' },
+      { key: 'cobalt', label: 'Cobalt Blue', hex: '#2563eb', hex2: '#06b6d4' },
+      { key: 'navy', label: 'Midnight Navy', hex: '#1e3a8a', hex2: '#3b82f6' },
+      { key: 'sky', label: 'Sky Wave', hex: '#0284c7', hex2: '#38bdf8' },
+      { key: 'cyan', label: 'Cyan Pulse', hex: '#0891b2', hex2: '#22d3ee' },
+      { key: 'teal', label: 'Teal Tide', hex: '#0d9488', hex2: '#2dd4bf' },
+      { key: 'emerald', label: 'Emerald', hex: '#059669', hex2: '#10b981' },
+      { key: 'mint', label: 'Mint Surge', hex: '#10b981', hex2: '#6ee7b7' },
+      { key: 'lime', label: 'Lime Surge', hex: '#65a30d', hex2: '#a3e635' },
+      { key: 'chartreuse', label: 'Chartreuse', hex: '#84cc16', hex2: '#d9f99d' },
+      { key: 'forest', label: 'Forest', hex: '#166534', hex2: '#22c55e' },
+      { key: 'jade', label: 'Jade', hex: '#16a34a', hex2: '#34d399' },
+      { key: 'seafoam', label: 'Seafoam', hex: '#14b8a6', hex2: '#5eead4' },
+      { key: 'aqua', label: 'Aqua', hex: '#06b6d4', hex2: '#a5f3fc' },
+      { key: 'azure', label: 'Azure', hex: '#0ea5e9', hex2: '#7dd3fc' },
+      { key: 'periwinkle', label: 'Periwinkle', hex: '#6366f1', hex2: '#a5b4fc' },
+      { key: 'lavender', label: 'Lavender', hex: '#8b5cf6', hex2: '#c4b5fd' },
+      { key: 'grape', label: 'Grape', hex: '#7e22ce', hex2: '#c084fc' },
+      { key: 'orchid', label: 'Orchid', hex: '#d946ef', hex2: '#f0abfc' },
+      { key: 'flamingo', label: 'Flamingo', hex: '#fb7185', hex2: '#f9a8d4' },
+      { key: 'grapefruit', label: 'Grapefruit', hex: '#fb6a5e', hex2: '#fb923c' },
+      { key: 'scarlet', label: 'Scarlet', hex: '#dc2626', hex2: '#f97316' },
+      { key: 'wine', label: 'Wine', hex: '#9f1239', hex2: '#e11d48' },
+      { key: 'copper', label: 'Copper', hex: '#ea580c', hex2: '#f97316' },
+      { key: 'tangerine', label: 'Tangerine', hex: '#fb8500', hex2: '#fbbf24' },
+      { key: 'honey', label: 'Honey', hex: '#eab308', hex2: '#fcd34d' },
+      { key: 'slate', label: 'Slate Frost', hex: '#475569', hex2: '#94a3b8' },
+    ];
+
+    var WHITE = [255, 255, 255],
+      BLACK = [0, 0, 0],
+      INK_D = [22, 20, 26]; // near-black used for dark-mode tints
+
+    function h2rgb(h) {
+      h = String(h).replace('#', '');
+      return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+    }
+    function mix(a, b, t) {
+      return [
+        Math.round(a[0] + (b[0] - a[0]) * t),
+        Math.round(a[1] + (b[1] - a[1]) * t),
+        Math.round(a[2] + (b[2] - a[2]) * t),
+      ];
+    }
+    function rgb(c) {
+      return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
+    }
+
+    // Set every accent-derived CSS variable from the two scheme colours.
+    window.applyAccentVars = function (hex, hex2, isDark) {
+      var c1 = h2rgb(hex),
+        c2 = h2rgb(hex2 || hex);
+      var r = document.documentElement.style;
+      if (isDark) {
+        r.setProperty('--accent', rgb(mix(c1, WHITE, 0.14)));
+        r.setProperty('--accent-dark', rgb(mix(c1, WHITE, 0.34)));
+        r.setProperty('--accent-tint', rgb(mix(c1, INK_D, 0.82)));
+        r.setProperty('--accent-tint2', rgb(mix(c1, [16, 18, 24], 0.9)));
+        r.setProperty('--commodity', rgb(mix(c1, WHITE, 0.14)));
+        r.setProperty('--commodity-tint', rgb(mix(c1, INK_D, 0.82)));
+        r.setProperty('--accent-2', rgb(mix(c2, WHITE, 0.1)));
+        r.setProperty('--accent-grad', 'linear-gradient(135deg,' + rgb(mix(c1, WHITE, 0.1)) + ',' + rgb(mix(c2, WHITE, 0.1)) + ')');
+      } else {
+        r.setProperty('--accent', rgb(c1));
+        r.setProperty('--accent-dark', rgb(mix(c1, BLACK, 0.26)));
+        r.setProperty('--accent-tint', rgb(mix(c1, WHITE, 0.85)));
+        r.setProperty('--accent-tint2', rgb(mix(c1, WHITE, 0.94)));
+        r.setProperty('--commodity', rgb(c1));
+        r.setProperty('--commodity-tint', rgb(mix(c1, WHITE, 0.85)));
+        r.setProperty('--accent-2', rgb(c2));
+        r.setProperty('--accent-grad', 'linear-gradient(135deg,' + rgb(c1) + ',' + rgb(c2) + ')');
+      }
+      // Sidebar = a deep blend of the two colours (kept dark enough for white
+      // text in every scheme, so it always themes without hurting contrast).
+      var deep = mix(c1, c2, 0.4);
+      r.setProperty('--sidebar', rgb(mix(deep, [24, 18, 12], 0.66)));
+      r.setProperty('--sidebar-hover', rgb(mix(deep, [24, 18, 12], 0.56)));
+      r.setProperty('--sidebar-active', rgb(mix(deep, BLACK, 0.28)));
+      r.setProperty('--sidebar-line', rgb(mix(deep, [24, 18, 12], 0.76)));
+    };
+
+    function prefersDark() {
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    // 'dark' | 'light' | 'system'  ->  boolean
+    window.resolveDark = function (mode) {
+      return mode === 'dark' ? true : mode === 'light' ? false : prefersDark();
+    };
+
+    // Random accent is chosen once per page load, then kept stable for the
+    // session (so re-renders don't reshuffle the colour on every click).
+    var sessionRandom = null;
+    window.pickAccentKey = function (accent) {
+      if (accent && accent !== 'random') return accent;
+      if (!sessionRandom) {
+        sessionRandom =
+          window.ACCENT_SCHEMES[Math.floor(Math.random() * window.ACCENT_SCHEMES.length)].key;
+      }
+      return sessionRandom;
+    };
+    window.schemeByKey = function (key) {
+      for (var i = 0; i < window.ACCENT_SCHEMES.length; i++) {
+        if (window.ACCENT_SCHEMES[i].key === key) return window.ACCENT_SCHEMES[i];
+      }
+      return window.ACCENT_SCHEMES[0];
+    };
+
+    // Apply a { mode, accent } preference to the live document. Returns the
+    // resolved state (what actually got applied).
+    window.applyAppearance = function (pref) {
+      pref = pref || {};
+      var mode = pref.mode || 'light';
+      var accent = pref.accent || 'orange';
+      var isDark = window.resolveDark(mode);
+      document.documentElement.classList.toggle('dark', isDark);
+      var key = window.pickAccentKey(accent);
+      var scheme = window.schemeByKey(key);
+      window.applyAccentVars(scheme.hex, scheme.hex2, isDark);
+      document.documentElement.setAttribute('data-accent', key);
+      return { mode: mode, accent: accent, resolvedDark: isDark, resolvedAccent: key };
+    };
+
+    // Roll a NEW random colour (used when Surprise-me is active and the login
+    // page re-appears, or when the user re-picks Surprise me). The freshly
+    // chosen colour is cached again so the whole app stays in sync with it.
+    window.reshuffleAppearance = function () {
+      sessionRandom = null;
+      return window.applyAppearance(window.__APPEARANCE__);
+    };
+
+    // Re-resolve on OS theme change while in System mode.
+    if (window.matchMedia) {
+      try {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+          var p = window.__APPEARANCE__ || {};
+          if ((p.mode || 'system') === 'system') window.applyAppearance(p);
+        });
+      } catch (e) {}
+    }
+
+    // Apply immediately from the server-injected preference.
+    try {
+      window.__APPEARANCE_APPLIED__ = window.applyAppearance(window.__APPEARANCE__);
+    } catch (e) {}
+  })();
+</script>

@@ -1,0 +1,48 @@
+<!-- ═══ ITDetails.html — IT Details project (column "IT DETAILED" on LOGIN PAGE) ═══
+     Data lives in a separate Sheet (URL read from LOGIN PAGE row 1), tab
+     RESPONSES-NEW (+ dropdown sources from tab DATABASE). Columns are
+     dynamic — see TABLE_DEFS.itDetails in DataTable.html. Add/Edit swap this
+     table view for the full-page form in ITDetailsForm.html. -->
+<script>
+  async function ensureITDetailsLoaded() {
+    if (S.itDetails.loaded || S.itDetails.loading) return;
+    S.itDetails.loading = true;
+    S.itDetails.error = '';
+    render();
+    try {
+      const res = await runServer('getItDetailsData');
+      if (res.success) {
+        S.itDetails.headers = res.headers || [];
+        S.itDetails.rows = res.data || [];
+        S.itDetails.dbOptions = res.dbOptions || {};
+        S.itDetails.loaded = true;
+        S.itDetails.error = '';
+      } else {
+        S.itDetails.error = res.message || 'Failed to load IT Details.';
+      }
+    } catch (err) {
+      S.itDetails.error = err.message;
+    }
+    S.itDetails.loading = false;
+    render();
+  }
+
+  async function refreshITDetails() {
+    S.itDetails.loaded = false;
+    await ensureITDetailsLoaded();
+  }
+
+  function renderITDetails() {
+    if (S.itForm && S.itForm.open) return renderItDetailsFormPage();
+    if (!S.itDetails.loaded && !S.itDetails.error) {
+      return `<div class="empty-state" style="padding-top:80px;"><div class="spinner" style="margin:0 auto 16px;"></div><div class="big">Loading IT Details…</div></div>`;
+    }
+    if (S.itDetails.error) {
+      return `<div class="empty-state"><div class="big">Could not load IT Details</div>${esc(S.itDetails.error)}<div style="margin-top:14px;"><button class="btn btn-gold" data-action="itdetails-refresh">Retry</button></div></div>`;
+    }
+    const buttons = `
+      <button class="btn btn-gold" data-action="itdetails-add" style="padding:7px 14px;">+ Add</button>
+      <button class="btn btn-ghost" data-action="itdetails-edit" style="padding:7px 14px;">✎ Edit</button>`;
+    return renderDataTable('itDetails', buttons);
+  }
+</script>

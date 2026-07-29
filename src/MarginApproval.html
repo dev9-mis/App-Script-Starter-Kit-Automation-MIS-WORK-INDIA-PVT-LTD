@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <base target="_top" />
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #faf6f0; color: #241a12; min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px; }
+      .card { width: 100%; max-width: 760px; background: #fff; border: 1px solid #ece2d5; border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px -28px rgba(123, 64, 25, 0.4); }
+      .head { background: linear-gradient(135deg, #7b4019, #ff7d29); color: #fff4e8; padding: 14px 24px; }
+      .head .ey { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; opacity: 0.85; }
+      .head h1 { font-size: 18px; font-weight: 700; margin-top: 3px; }
+      .body { padding: 20px 24px; }
+      .muted { color: #9c8a76; font-size: 12px; margin-bottom: 6px; }
+      .sec { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #9c8a76; margin: 16px 0 7px; }
+      table { width: 100%; border-collapse: collapse; }
+      td, th { padding: 3px 10px; border: 1px solid #ece2d5; font-size: 12px; line-height: 1.2; vertical-align: top; text-align: left; }
+      td.l { background: #fff8ea; color: #5a4a3b; font-weight: 700; }
+      table.rec td.l { width: 18%; } table.rec td.v { width: 32%; }
+      table.cmp th { background: #fbefe0; color: #7a5a10; font-weight: 700; text-transform: uppercase; font-size: 10px; }
+      table.cmp td.l { width: 34%; }
+      table.cmp td.nv { font-weight: 700; }
+      table.cmp tr.chg td.l { background: #fff8d6; color: #7a5a10; border-color: #e8cf6a; }
+      table.cmp tr.chg td.nv { background: #fff8d6; color: #7a5a10; border-color: #e8cf6a; }
+      .btns { display: flex; gap: 12px; margin-top: 22px; }
+      .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; flex: 1; padding: 13px; border: none; border-radius: 10px; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+      .btn.approve { background: linear-gradient(135deg, #2fa85a, #1e874a); }
+      .btn.reject { background: linear-gradient(135deg, #e2544a, #c4291c); }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .note { margin-top: 16px; padding: 12px 14px; border-radius: 10px; font-size: 13px; line-height: 1.5; font-weight: 500; }
+      .note.ok { background: #e5f5ea; color: #2e7d46; }
+      .note.warn { background: #fff8d6; color: #8a6a12; border: 1px solid #e8cf6a; }
+      .note.err { background: #fbeae9; color: #c4291c; }
+      .center { text-align: center; padding: 30px 10px; color: #9c8a76; }
+      .spinner { width: 34px; height: 34px; border-radius: 50%; border: 3px solid #ece2d5; border-top-color: #ff7d29; margin: 0 auto 12px; animation: spin 0.8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="head">
+        <div class="ey">Pageformat System</div>
+        <h1>Margin Change Approval</h1>
+      </div>
+      <div class="body" id="body">
+        <div class="center"><div class="spinner"></div>Loading…</div>
+      </div>
+    </div>
+
+    <script>
+      var TOKEN = '<?= token ?>';
+      var PRELOAD = <?!= preload ?>;
+
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      }
+      function render(d) {
+        var b = document.getElementById('body');
+        if (!d || !d.ok) {
+          b.innerHTML = '<div class="note err">' + esc((d && d.message) || 'Could not load this request.') + '</div>';
+          return;
+        }
+        var html =
+          '<p class="muted">Review the margin change for <b style="color:#241a12">' + esc(d.uniqueNo) + '</b> · ' + esc(d.userId) + (d.userName ? ' · ' + esc(d.userName) : '') + '</p>' +
+          '<p class="muted">Submitted at <b>' + esc(d.submittedAt) + '</b></p>' +
+          (d.recordHtml ? '<div class="sec">Record</div><table class="rec"><tbody>' + d.recordHtml + '</tbody></table>' : '') +
+          '<div class="sec">Margin change (old → new)</div>' +
+          '<table class="cmp"><thead><tr><th>Field</th><th>Old</th><th>New</th></tr></thead><tbody>' + (d.compareHtml || '') + '</tbody></table>';
+        if (d.decided) {
+          var cls = d.decision === 'APPROVED' ? 'ok' : 'warn';
+          html += '<div class="note ' + cls + '">This request was already marked <b>' + esc(d.decision || 'DECIDED') + '</b> at <b>' + esc(d.approvedAt) + '</b>.</div>';
+        } else {
+          html +=
+            '<div class="btns">' +
+            '<button class="btn approve" id="approveBtn" onclick="doDecision(\'APPROVED\')">✓ Approve</button>' +
+            '<button class="btn reject" id="rejectBtn" onclick="doDecision(\'NOT APPROVED\')">✕ Not Approved</button>' +
+            '</div>';
+        }
+        b.innerHTML = html;
+      }
+      function doDecision(decision) {
+        var a = document.getElementById('approveBtn'), r = document.getElementById('rejectBtn');
+        if (a) a.disabled = true;
+        if (r) r.disabled = true;
+        var acting = decision === 'APPROVED' ? a : r;
+        if (acting) acting.textContent = decision === 'APPROVED' ? 'Approving…' : 'Saving…';
+        google.script.run
+          .withSuccessHandler(function (res) {
+            var b = document.getElementById('body');
+            if (res && res.status === 'ok') {
+              if (res.decision === 'APPROVED') {
+                b.innerHTML = '<div class="note ok">✓ Approved at <b>' + esc(res.approvedAt) + '</b>.<br>New margin <b>' + esc(res.newMargin) + '</b> is now approved for ' + esc(res.uniqueNo) + '.</div>';
+              } else {
+                b.innerHTML = '<div class="note err">✕ Marked <b>NOT APPROVED</b> at <b>' + esc(res.approvedAt) + '</b> for ' + esc(res.uniqueNo) + '. The margin change was not applied.</div>';
+              }
+            } else if (res && res.status === 'already') {
+              b.innerHTML = '<div class="note warn">' + esc(res.message) + '</div>';
+            } else {
+              b.innerHTML = '<div class="note err">' + esc((res && res.message) || 'Action failed.') + '</div>';
+            }
+          })
+          .withFailureHandler(function (err) {
+            document.getElementById('body').innerHTML = '<div class="note err">' + esc(err.message || String(err)) + '</div>';
+          })
+          .approveMarginEntry(TOKEN, decision);
+      }
+
+      if (PRELOAD && typeof PRELOAD === 'object') {
+        render(PRELOAD);
+      } else {
+        google.script.run
+          .withSuccessHandler(render)
+          .withFailureHandler(function (err) {
+            document.getElementById('body').innerHTML = '<div class="note err">' + esc(err.message || String(err)) + '</div>';
+          })
+          .getMarginApprovalDetails(TOKEN);
+      }
+    </script>
+  </body>
+</html>

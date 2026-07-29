@@ -1,0 +1,2491 @@
+<script>
+  /* ============================= CONFIG ============================= */
+  const MIN_ROWS = 20;
+  const PAGE_SIZE_OPTIONS = [50, 100, 500, 1000];
+  const AUTO_LOGOUT_TIME = '23:59';
+
+  /* ============================= STATE ============================= */
+  function dtState() {
+    return {
+      sort: null,
+      dir: 1,
+      hidden: new Set(),
+      filters: {},
+      filterOpen: null,
+      widths: {},
+      page: 1,
+      pageSize: 50,
+      dateFilters: {},
+    };
+  }
+  function blankRowA() {
+    return {
+      code: '',
+      userId: '',
+      software: '',
+      name: '',
+      group: '',
+      branchName: '',
+      marginRMS: '',
+      marginAllocated: '',
+    };
+  }
+  function blankRowB() {
+    return { group: '', margin: '' };
+  }
+  function freshSeg() {
+    return {
+      date: '',
+      rowsA: Array.from({ length: MIN_ROWS }, blankRowA),
+      rowsB: Array.from({ length: 10 }, blankRowB),
+      showErrors: false,
+    };
+  }
+
+  let S = {
+    ready: false,
+    loadError: '',
+    user: null,
+    page: null,
+    syncing: false,
+    dataReady: false, // true once the one post-login batch (getBootstrapData) has arrived
+    profileMenuOpen: false,
+    showLogoutConfirm: false,
+    sidebarOpenSections: new Set(),
+    itDetails: { headers: [], rows: [], dbOptions: {}, loaded: false, loading: false, error: '' },
+    itForm: null,
+    boForm: null,
+    masterEquity: [],
+    masterCommodity: [],
+    respEquity: [],
+    respCommodity: [],
+    resp2Equity: [],
+    resp2Commodity: [],
+    users: [],
+    missingSheets: [],
+    entry: { equity: freshSeg(), commodity: freshSeg() },
+    toast: null,
+    loginError: '',
+    loginView: 'login', // 'login' | 'forgot'
+    loggingIn: false,
+    loginId: '', // bound to the login fields so a re-render (Signing in… / error)
+    loginPw: '', // never wipes what the user typed
+    loginInvalid: false, // highlight the fields after a failed attempt
+    forgotError: '',
+    forgotOk: '',
+    forgotBusy: false,
+    pwForm: { current: '', next: '', confirm: '', busy: false, error: '', ok: '' },
+    dt: {
+      resp1Equity: dtState(),
+      resp1Commodity: dtState(),
+      resp2Equity: dtState(),
+      resp2Commodity: dtState(),
+      masterEquity: dtState(),
+      masterCommodity: dtState(),
+      itDetails: dtState(),
+    },
+    tablePrefs: {}, // per-user saved column widths + hidden columns (by tableKey)
+    colMenuOpen: null,
+    entryWidths: {},
+    logoutAt: 0,
+    saving: false,
+    masterAdd: null,
+    report: {
+      month: new Date().getMonth(),
+      year: new Date().getFullYear(),
+      search: '',
+      sort: null,
+      sortDir: 1,
+      filter: 'all',
+      widths: {},
+      monthSort: null,
+      monthSortDir: 1,
+    },
+    darkMode: false,
+    // Appearance: { mode:'dark'|'light'|'system', accent:'<scheme>'|'random' }.
+    // Seeded from the server-injected pref that Theme.html already applied.
+    // App settings, seeded from the server-injected blob (theme + layout).
+    appearance:
+      window.__APPEARANCE__ && typeof window.__APPEARANCE__ === 'object'
+        ? {
+            mode: window.__APPEARANCE__.mode || 'light',
+            accent: window.__APPEARANCE__.accent || 'orange',
+            fontSize: window.__APPEARANCE__.fontSize || 100,
+          }
+        : { mode: 'light', accent: 'orange', fontSize: 100 },
+    appearanceSaving: false,
+    fontSize:
+      (window.__APPEARANCE__ && parseInt(window.__APPEARANCE__.fontSize, 10)) || 100,
+    sidebarCollapsed: false,
+    sidebarDrawerOpen: false, // mobile off-canvas drawer
+    bgSyncing: false, // background 5-min sync in progress (spins the refresh icon)
+  };
+
+  try {
+    const ew = localStorage.getItem('margin_entry_widths');
+    if (ew) S.entryWidths = JSON.parse(ew);
+  } catch (e) {}
+  try {
+    const rw = localStorage.getItem('margin_rpt_widths');
+    if (rw) S.report.widths = JSON.parse(rw);
+  } catch (e) {}
+  // Theme.html already applied the appearance before paint; mirror the resolved
+  // dark state so the quick toggle icon is correct.
+  S.darkMode = !!(window.__APPEARANCE_APPLIED__ && window.__APPEARANCE_APPLIED__.resolvedDark);
+  // Browser-zoom-style text scaling. `zoom` on <body> shrinks/grows the WHOLE
+  // app uniformly (font + spacing + controls + overlays). Width auto-fills under
+  // zoom, but a definite height (100%) would render short and leave an empty
+  // strip — so we counter the body height by 1/zoom, making it fill the viewport
+  // exactly at any size (no gap when shrinking, no clipping when enlarging).
+  // Every full-height element uses height:100% so it chains down and fills.
+  function applyFontZoom(fs) {
+    const b = document.body;
+    if (!b) return;
+    const z = (fs || 100) / 100;
+    if (z === 1) {
+      b.style.zoom = '';
+      b.style.height = '';
+    } else {
+      b.style.zoom = z;
+      b.style.height = 100 / z + 'vh';
+    }
+  }
+  // Apply the layout font size that came from Script Properties (no localStorage;
+  // the setting lives server-side so it follows the app everywhere).
+  if (S.fontSize >= 70 && S.fontSize <= 130 && S.fontSize !== 100) applyFontZoom(S.fontSize);
+
+  // Persist a font-size change to Script Properties (debounced so rapid A-/A+
+  // clicks make one write). It's stored in the same settings blob as the theme.
+  let fontSaveTimer = null;
+  function saveFontSizePref() {
+    S.appearance = Object.assign({}, S.appearance, { fontSize: S.fontSize });
+    window.__APPEARANCE__ = S.appearance;
+    clearTimeout(fontSaveTimer);
+    fontSaveTimer = setTimeout(() => {
+      google.script.run
+        .withSuccessHandler(() => {})
+        .withFailureHandler(() => {})
+        .saveAppearance(S.appearance);
+    }, 700);
+  }
+  try {
+    S.sidebarCollapsed = localStorage.getItem('margin_sidebar_collapsed') === 'true';
+  } catch (e) {}
+  function saveEntryWidths() {
+    try {
+      localStorage.setItem('margin_entry_widths', JSON.stringify(S.entryWidths));
+    } catch (e) {}
+  }
+
+  /* ---------------- Appearance (theme) ---------------- */
+  // Merge a change, apply it live, mirror dark state, and persist to the server
+  // (Script Properties) so it reflects on the next load for everyone.
+  function setAppearance(patch) {
+    S.appearance = Object.assign({}, S.appearance, patch || {});
+    window.__APPEARANCE__ = S.appearance; // keep the OS-change listener in sync
+    // Picking "Surprise me" rolls a fresh random colour immediately.
+    const applied =
+      patch && patch.accent === 'random'
+        ? window.reshuffleAppearance()
+        : window.applyAppearance(S.appearance);
+    S.darkMode = applied.resolvedDark;
+    S.appearanceSaving = true;
+    google.script.run
+      .withSuccessHandler(() => {
+        S.appearanceSaving = false;
+      })
+      .withFailureHandler(() => {
+        S.appearanceSaving = false;
+      })
+      .saveAppearance(S.appearance);
+    render();
+  }
+  function accentSwatch(hex, hex2) {
+    return 'linear-gradient(135deg,' + hex + ' 0%,' + (hex2 || hex) + ' 100%)';
+  }
+  function freshRows() {
+    S.entry = { equity: freshSeg(), commodity: freshSeg() };
+  }
+
+  /* ============================= APPS SCRIPT BRIDGE ============================= */
+  function runServer(fnName, ...args) {
+    return new Promise((resolve, reject) => {
+      if (typeof google === 'undefined' || !google.script || !google.script.run) {
+        reject(
+          new Error(
+            'google.script.run not available — open this page via the Apps Script /exec URL.'
+          )
+        );
+        return;
+      }
+      let call = google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler((err) => reject(new Error(err.message || String(err))));
+      call[fnName](...args);
+    });
+  }
+
+  function applyBootstrap(data) {
+    // google.script.run resolves to null if the server payload failed to
+    // serialize — guard so it's a clear message, not "reading 'masterEquity'".
+    if (!data) throw new Error('Server returned no data (payload could not be loaded). Try Refresh.');
+    S.masterEquity = data.masterEquity || [];
+    S.masterCommodity = data.masterCommodity || [];
+    S.respEquity = data.respEquity || [];
+    S.respCommodity = data.respCommodity || [];
+    S.resp2Equity = data.resp2Equity || [];
+    S.resp2Commodity = data.resp2Commodity || [];
+    // Perms only — passwords never reach the browser (authenticate() checks
+    // them server-side), so a plain replace is correct here.
+    S.users = data.users || [];
+    S.missingSheets = data.missingSheets || [];
+    // IT Details is preloaded in the same batch (when the user has the perm),
+    // so its page renders instantly with no extra round-trip. If the project
+    // Sheet URL was bad, mark the error so the page shows a Retry instead.
+    if (data.itDetails) {
+      if (data.itDetails.success) {
+        S.itDetails.headers = data.itDetails.headers || [];
+        S.itDetails.rows = data.itDetails.data || [];
+        S.itDetails.dbOptions = data.itDetails.dbOptions || {};
+        S.itDetails.loaded = true;
+        S.itDetails.error = '';
+      } else {
+        S.itDetails.error = data.itDetails.message || 'Failed to load IT Details.';
+      }
+      S.itDetails.loading = false;
+    }
+  }
+
+  /* ---- Per-user DataTable preferences (column widths + hidden columns) ----
+     Loaded once after login and re-applied so a user's layout follows them
+     across sessions/devices; saved (debounced) whenever they resize a column
+     or toggle one on/off. Stored server-side in Script Properties by user id. */
+  function applyTablePrefs(prefs) {
+    S.tablePrefs = prefs && typeof prefs === 'object' ? prefs : {};
+    Object.keys(S.tablePrefs).forEach((tk) => {
+      if (!S.dt[tk]) return;
+      const p = S.tablePrefs[tk] || {};
+      if (p.widths && typeof p.widths === 'object') S.dt[tk].widths = Object.assign({}, p.widths);
+      if (Array.isArray(p.hidden)) S.dt[tk].hidden = new Set(p.hidden);
+    });
+  }
+  let tablePrefTimer = null;
+  function persistTablePref(tableKey) {
+    if (!S.user || !S.dt[tableKey]) return;
+    if (!S.tablePrefs) S.tablePrefs = {};
+    const st = S.dt[tableKey];
+    S.tablePrefs[tableKey] = {
+      widths: Object.assign({}, st.widths),
+      hidden: Array.from(st.hidden),
+    };
+    clearTimeout(tablePrefTimer);
+    tablePrefTimer = setTimeout(() => {
+      google.script.run
+        .withSuccessHandler(function () {})
+        .withFailureHandler(function () {})
+        .saveUserTablePrefs(S.user.id, S.tablePrefs);
+    }, 600);
+  }
+
+  async function loadAll() {
+    // Login is verified server-side (authenticate), so we no longer need to
+    // pre-fetch the user list — show the login screen INSTANTLY with no
+    // round-trip. All data loads in one batch right after a successful login.
+    S.ready = true;
+    render();
+    startClock();
+  }
+
+  async function loadHeavyData() {
+    S.syncing = true;
+    render();
+    try {
+      const perms = S.user
+        ? {
+            equityEntry: S.user.equityEntry,
+            commodityEntry: S.user.commodityEntry,
+            masterEquity: S.user.masterEquity,
+            masterCommodity: S.user.masterCommodity,
+            masterEquityAdd: S.user.masterEquityAdd,
+            masterCommodityAdd: S.user.masterCommodityAdd,
+            resp1Equity: S.user.resp1Equity,
+            resp1Commodity: S.user.resp1Commodity,
+            resp2Equity: S.user.resp2Equity,
+            resp2Commodity: S.user.resp2Commodity,
+            report: S.user.report,
+            itDetails: S.user.itDetails,
+          }
+        : null;
+      applyBootstrap(await runServer('getBootstrapData', perms));
+      if (S.user) {
+        // getBootstrapData already returns fresh users (read from LOGIN PAGE in
+        // the same call), so merge the latest perms from there — no extra
+        // getUserPermissions round-trip needed.
+        const f = S.users.find((u) => u.id.toLowerCase() === S.user.id.toLowerCase());
+        if (f) S.user = Object.assign({}, S.user, f);
+        // Restore this user's saved table layout (column widths + hidden cols).
+        try {
+          applyTablePrefs(await runServer('getUserTablePrefs', S.user.id));
+        } catch (e) {}
+      }
+      S.loadError = '';
+      S.dataReady = true;
+    } catch (err) {
+      // Surface a retryable error screen instead of an endless "Loading data…".
+      S.loadError = 'Data load failed: ' + err.message;
+      showToast('Data load error: ' + err.message, true);
+    }
+    S.syncing = false;
+    freshRows();
+    render();
+    // Kick off the background 5-min auto-sync once the first load succeeded.
+    if (S.user && S.dataReady) startAutoSync();
+  }
+
+  async function refreshData() {
+    S.syncing = true;
+    render();
+    try {
+      const perms = S.user
+        ? {
+            equityEntry: S.user.equityEntry,
+            commodityEntry: S.user.commodityEntry,
+            masterEquity: S.user.masterEquity,
+            masterCommodity: S.user.masterCommodity,
+            masterEquityAdd: S.user.masterEquityAdd,
+            masterCommodityAdd: S.user.masterCommodityAdd,
+            resp1Equity: S.user.resp1Equity,
+            resp1Commodity: S.user.resp1Commodity,
+            resp2Equity: S.user.resp2Equity,
+            resp2Commodity: S.user.resp2Commodity,
+            report: S.user.report,
+            itDetails: S.user.itDetails,
+          }
+        : null;
+      applyBootstrap(await runServer('getBootstrapData', perms));
+      if (S.user) {
+        const fresh = await runServer('getUserPermissions', S.user.id);
+        if (fresh) S.user = Object.assign({}, S.user, fresh);
+        const pk = allNavItems().find((n) => n.key === S.page)?.perm;
+        if (pk && !S.user[pk]) S.page = firstAllowedPage();
+      }
+      S.loadError = '';
+      S.dataReady = true;
+      S.syncing = false;
+      Object.keys(S.dt).forEach((k) => {
+        S.dt[k].filters = {};
+        S.dt[k].dateFilters = {};
+        S.dt[k].filterOpen = null;
+        S.dt[k].page = 1;
+      });
+      showToast('Sheet se latest data mil gaya.', false);
+      render();
+    } catch (err) {
+      S.syncing = false;
+      showToast('Refresh nahi ho paya: ' + err.message, true);
+      render();
+    }
+  }
+
+  /* ===================== BACKGROUND AUTO-SYNC (every 5 min) =====================
+     After login, silently pulls fresh sheet data into the global store every 5
+     minutes. It never disturbs an in-progress save or active typing — it defers
+     that cycle — and it doesn't reset filters/paging or show a toast/spinner.
+     The store is updated in the background so any table/form opened afterwards
+     shows the latest data; the visible page repaints only when it's safe. */
+  const AUTO_SYNC_MS = 5 * 60 * 1000;
+  let autoSyncTimer = null;
+  let autoSyncInFlight = false;
+
+  // True when we must NOT touch the UI/data: a save/server op is running, or the
+  // user is mid-interaction (typing, a dropdown/menu open).
+  function appIsBusy() {
+    if (document.getElementById('savingOverlay')) return true;
+    if (S.syncing || S.loggingIn || S.forgotBusy) return true;
+    if (S.boForm && S.boForm.saving) return true;
+    if (S.mgForm && S.mgForm.saving) return true;
+    if (S.itForm && S.itForm.saving) return true;
+    if (S.pwForm && S.pwForm.busy) return true;
+    if (S.profileMenuOpen || S.colMenuOpen || S.showLogoutConfirm) return true;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) {
+      return true;
+    }
+    return false;
+  }
+
+  function bootstrapPerms() {
+    return S.user
+      ? {
+          equityEntry: S.user.equityEntry,
+          commodityEntry: S.user.commodityEntry,
+          masterEquity: S.user.masterEquity,
+          masterCommodity: S.user.masterCommodity,
+          masterEquityAdd: S.user.masterEquityAdd,
+          masterCommodityAdd: S.user.masterCommodityAdd,
+          resp1Equity: S.user.resp1Equity,
+          resp1Commodity: S.user.resp1Commodity,
+          resp2Equity: S.user.resp2Equity,
+          resp2Commodity: S.user.resp2Commodity,
+          report: S.user.report,
+          itDetails: S.user.itDetails,
+        }
+      : null;
+  }
+
+  // Spin the "Refresh from Sheet" icon(s) + swap the label — done via direct DOM
+  // so the ongoing work/page is never re-rendered or disturbed.
+  function setSyncIndicator(on) {
+    document.querySelectorAll('.sync-ic').forEach((el) => el.classList.toggle('sync-spin', on));
+    document.querySelectorAll('.sync-label').forEach((el) => {
+      el.textContent = on ? 'Syncing data…' : 'Refresh from Sheet';
+    });
+  }
+
+  async function backgroundRefresh() {
+    if (!S.user || !S.dataReady) return; // only when logged in and initial load done
+    if (autoSyncInFlight || appIsBusy()) return; // defer — a save/typing is happening
+    autoSyncInFlight = true;
+    S.bgSyncing = true;
+    setSyncIndicator(true);
+    try {
+      const data = await runServer('getBootstrapData', bootstrapPerms());
+      if (!data) return;
+      // A save may have STARTED while we were fetching — don't overwrite the
+      // store from under it; just skip this cycle and catch it on the next tick.
+      if (
+        document.getElementById('savingOverlay') ||
+        (S.boForm && S.boForm.saving) ||
+        (S.mgForm && S.mgForm.saving) ||
+        (S.itForm && S.itForm.saving)
+      ) {
+        return;
+      }
+      // Update the global store WITHOUT resetting filters/paging or the form.
+      applyBootstrap(data);
+      if (S.user) {
+        const f = S.users.find((u) => u.id.toLowerCase() === S.user.id.toLowerCase());
+        if (f) S.user = Object.assign({}, S.user, f);
+      }
+      S.lastAutoSync = Date.now();
+      // Repaint the visible page ONLY if the user isn't interacting right now, so
+      // an open table shows the fresh rows without interrupting anything.
+      if (!appIsBusy()) render();
+    } catch (e) {
+      // Silent: background sync, will retry on the next tick.
+    } finally {
+      autoSyncInFlight = false;
+      S.bgSyncing = false;
+      setSyncIndicator(false);
+    }
+  }
+
+  function startAutoSync() {
+    stopAutoSync();
+    autoSyncTimer = setInterval(backgroundRefresh, AUTO_SYNC_MS);
+  }
+  function stopAutoSync() {
+    if (autoSyncTimer) {
+      clearInterval(autoSyncTimer);
+      autoSyncTimer = null;
+    }
+  }
+
+  /* ============================= SEGMENT HELPERS ============================= */
+  function currentSegment() {
+    return S.page === 'entryCommodity' ? 'commodity' : S.page === 'entryEquity' ? 'equity' : null;
+  }
+  function masterFor(seg) {
+    return seg === 'commodity' ? S.masterCommodity : S.masterEquity;
+  }
+  function uniqueCodes(seg) {
+    return Array.from(
+      new Set(
+        masterFor(seg)
+          .map((m) => m.code)
+          .filter(Boolean)
+      )
+    ).sort();
+  }
+  function matchesForCode(seg, code) {
+    return masterFor(seg).filter((m) => m.code === code);
+  }
+  function groupNamesList(seg) {
+    return Array.from(
+      new Set(
+        masterFor(seg)
+          .map((m) => m.group)
+          .filter(Boolean)
+      )
+    ).sort();
+  }
+
+  const CASCADE_FIELDS = ['userId', 'software', 'name', 'group', 'branchName'];
+
+  function resolveCascade(seg, r) {
+    const info = {};
+    let matches = r.code ? matchesForCode(seg, r.code) : [];
+    let blocked = !r.code;
+    CASCADE_FIELDS.forEach((f) => {
+      if (blocked) {
+        r[f] = '';
+        info[f] = { options: [], dropdown: false };
+        return;
+      }
+      const distinct = Array.from(new Set(matches.map((m) => m[f]).filter(Boolean)));
+      if (distinct.length === 0) {
+        r[f] = '';
+        info[f] = { options: [], dropdown: false };
+        blocked = true;
+        return;
+      }
+      if (distinct.length === 1) {
+        r[f] = distinct[0];
+        info[f] = { options: distinct, dropdown: false };
+        matches = matches.filter((m) => m[f] === distinct[0]);
+        return;
+      }
+      info[f] = { options: distinct, dropdown: true };
+      if (r[f] && distinct.includes(r[f])) {
+        matches = matches.filter((m) => m[f] === r[f]);
+      } else {
+        r[f] = '';
+        blocked = true;
+      }
+    });
+    return info;
+  }
+
+  function filterOptionsContains(options, query) {
+    if (!query) return options;
+    const q = String(query).toLowerCase();
+    return options.filter((o) => String(o).toLowerCase().includes(q));
+  }
+
+  function buildCascadeCellHtml(f, i, val, opt, isErr) {
+    val = val || '';
+    if (opt && opt.dropdown) {
+      const listId = `cl-${f}-${i}`;
+      const filtered = filterOptionsContains(opt.options, val);
+      return `<input type="text" class="${isErr ? 'cell-error' : ''}" data-field="${f}" data-a="${f}" data-i="${i}" list="${listId}" value="${esc(val)}" placeholder="Select…" autocomplete="off"><datalist id="${listId}">${filtered.map((o) => `<option value="${esc(o)}">`).join('')}</datalist>`;
+    }
+    return `<div class="cell-ro${isErr ? ' cell-error' : ''}" data-field="${f}">${esc(val)}</div>`;
+  }
+
+  function refreshDatalist(listId, options) {
+    const dl = document.getElementById(listId);
+    if (!dl) return;
+    dl.innerHTML = options.map((o) => `<option value="${esc(o)}">`).join('');
+  }
+
+  function liveSyncRow(seg, i, activeField) {
+    const E = S.entry[seg];
+    const r = E.rowsA[i];
+    if (!r) return;
+    const info = resolveCascade(seg, r);
+    const row = document.querySelector(`tr[data-rowa="${i}"]`);
+    if (!row) return;
+    const anyA =
+      r.code ||
+      r.userId !== '' ||
+      r.software ||
+      r.name ||
+      r.group ||
+      r.branchName ||
+      r.marginRMS !== '' ||
+      r.marginAllocated !== '';
+    const showE = E.showErrors && anyA;
+
+    if (activeField === 'code') {
+      const codeInput = row.querySelector('[data-a="code"]');
+      if (codeInput)
+        refreshDatalist('codelist', filterOptionsContains(uniqueCodes(seg), codeInput.value));
+    }
+
+    CASCADE_FIELDS.forEach((f) => {
+      if (f === activeField) {
+        if (info[f] && info[f].dropdown) {
+          const liveEl = row.querySelector(`[data-field="${f}"]`);
+          if (liveEl && liveEl.tagName === 'INPUT')
+            refreshDatalist(`cl-${f}-${i}`, filterOptionsContains(info[f].options, liveEl.value));
+        }
+        return;
+      }
+      const cell = row.querySelector(`[data-field="${f}"]`);
+      if (!cell) return;
+      const td = cell.closest('td');
+      if (!td) return;
+      td.innerHTML = buildCascadeCellHtml(f, i, r[f], info[f], showE && !r[f]);
+    });
+  }
+
+  /* ============================= HELPERS ============================= */
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return '&#' + c.charCodeAt(0) + ';';
+    });
+  }
+  function trashIcon() {
+    return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
+  }
+  function fmtNow() {
+    const d = new Date();
+    const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getDate())}-${M[d.getMonth()]}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function fmtDateDisplay(iso) {
+    if (!iso) return '';
+    const [y, m, d] = iso.split('-');
+    const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${d}-${M[parseInt(m, 10) - 1]}-${y}`;
+  }
+
+  function parseDT(v) {
+    if (v == null) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    const M = {
+      jan: 0,
+      feb: 1,
+      mar: 2,
+      apr: 3,
+      may: 4,
+      jun: 5,
+      jul: 6,
+      aug: 7,
+      sep: 8,
+      oct: 9,
+      nov: 10,
+      dec: 11,
+    };
+    const m = s.match(
+      /^(\d{1,2})[-\/\s]([A-Za-z]{3,})[-\/\s](\d{4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+    );
+    if (m) {
+      const day = +m[1],
+        mon = M[m[2].slice(0, 3).toLowerCase()],
+        yr = +m[3];
+      if (mon === undefined) return null;
+      const hh = +(m[4] || 0),
+        mm = +(m[5] || 0),
+        ss = +(m[6] || 0);
+      return new Date(yr, mon, day, hh, mm, ss).getTime();
+    }
+    const t = Date.parse(s);
+    return isNaN(t) ? null : t;
+  }
+  function isDateColumn(key) {
+    return key === 'timestamp' || key === 'date';
+  }
+  function showNegError(el) {
+    const td = el.closest('td');
+    if (!td) return;
+    let msg = td.querySelector('.neg-err');
+    if (!msg) {
+      msg = document.createElement('div');
+      msg.className = 'neg-err';
+      td.appendChild(msg);
+    }
+    msg.textContent = 'Negative value not allowed';
+    msg.style.display = 'block';
+    setTimeout(() => {
+      msg.style.display = 'none';
+    }, 1000);
+  }
+
+  function showSavingOverlay(msg) {
+    let el = document.getElementById('savingOverlay');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'savingOverlay';
+      document.body.appendChild(el);
+    }
+    el.className = 'saving-overlay';
+    el.innerHTML = `<div class="saving-box"><span class="spinner"></span>${esc(msg || 'Saving…')}</div>`;
+  }
+  function hideSavingOverlay() {
+    const el = document.getElementById('savingOverlay');
+    if (el) el.remove();
+  }
+
+  function showToast(msg, isErr, noRender) {
+    S.toast = { msg, isErr };
+    if (!noRender) {
+      render();
+    } else {
+      let t = document.querySelector('.toast');
+      if (t) t.remove();
+      const d = document.createElement('div');
+      d.className = 'toast' + (isErr ? ' err' : '');
+      d.innerHTML = `<span>${isErr ? '⚠' : '✓'}</span>${esc(msg)}`;
+      document.body.appendChild(d);
+    }
+    setTimeout(() => {
+      S.toast = null;
+      const t = document.querySelector('.toast');
+      if (t) t.remove();
+    }, 3000);
+  }
+
+  /* ============================= AUTO-LOGOUT (NIGHT) ============================= */
+  function nextLogoutTs() {
+    const parts = String(AUTO_LOGOUT_TIME).split(':');
+    const h = parseInt(parts[0], 10) || 0,
+      m = parseInt(parts[1], 10) || 0;
+    const now = new Date();
+    const t = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+    if (t.getTime() <= now.getTime()) t.setDate(t.getDate() + 1);
+    return t.getTime();
+  }
+  function forceNightLogout() {
+    stopAutoSync();
+    S.user = null;
+    S.page = null;
+    S.dataReady = false;
+    S.sidebarOpenSections = new Set();
+    S.logoutAt = 0;
+    S.loginError =
+      'Raat ke auto-logout ke kaaran aap sign out ho gaye. Kripya dobara login karein.';
+    if (window.reshuffleAppearance) S.darkMode = window.reshuffleAppearance().resolvedDark;
+    render();
+  }
+
+  /* ============================= LIVE CLOCK ============================= */
+  // Last rendered clock string — lets the topbar seed itself with the current
+  // time instead of "--:--:--" whenever the shell is (re)built.
+  let lastClockText = '';
+  function clockText() {
+    const d = new Date();
+    const h = d.getHours(),
+      m = d.getMinutes(),
+      s = d.getSeconds();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(h12)}:${pad(m)}:${pad(s)} ${ampm}`;
+  }
+  function startClock() {
+    setInterval(() => {
+      if (S.user && S.logoutAt && Date.now() >= S.logoutAt) {
+        forceNightLogout();
+        return;
+      }
+      lastClockText = clockText();
+      const el = document.getElementById('liveClock');
+      if (el) el.textContent = lastClockText;
+    }, 1000);
+  }
+
+  /* ============================= DATE PICKER ============================= */
+  function initEntryDatePicker() {
+    const el = document.getElementById('entryDate');
+    if (!el) return;
+    if (typeof flatpickr === 'undefined') return;
+    document.querySelectorAll('.flatpickr-calendar').forEach((c) => c.remove());
+    const seg = currentSegment();
+    flatpickr(el, {
+      dateFormat: 'Y-m-d',
+      altInput: true,
+      altFormat: 'd-M-Y',
+      altInputClass: 'flatpickr-alt',
+      allowInput: false,
+      disableMobile: true,
+      defaultDate: (seg && S.entry[seg].date) || null,
+      onChange: function (sel, ds) {
+        const s = currentSegment();
+        if (s) {
+          S.entry[s].date = ds;
+          const a = document.querySelector('.flatpickr-alt');
+          if (a && ds) {
+            a.classList.remove('cell-error');
+            a.style.borderColor = '';
+            a.style.background = '';
+          }
+        }
+      },
+      onClose: function (sel, ds) {
+        const s = currentSegment();
+        if (s) S.entry[s].date = ds;
+      },
+    });
+    if (seg && S.entry[seg].showErrors && !S.entry[seg].date) {
+      const a = document.querySelector('.flatpickr-alt');
+      if (a) {
+        a.classList.add('cell-error');
+        a.style.borderColor = '#C4291C';
+        a.style.background = '#FEF2F2';
+      }
+    }
+  }
+
+  /* ============================= LOGIN ============================= */
+  const EYE_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+  // Premium brand mark — stacked "pages" (layers). White on the accent tile, so
+  // it recolours with the theme. Used in the sidebar and on the login page.
+  const BRAND_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 7.5 12 12l9-4.5L12 3Z"/><path d="M3 12.2 12 16.7l9-4.5"/><path d="M3 16.4 12 20.9l9-4.5"/></svg>';
+  function renderLogin() {
+    const floatIcon = (cls, svg) => `<span class="l2-float ${cls}">${svg}</span>`;
+    return `
+  <div class="login2">
+    <div class="login2-hero">
+      <div class="l2-texture"></div>
+      <span class="l2-orb o1"></span>
+      <span class="l2-orb o2"></span>
+      <span class="l2-orb o3"></span>
+      <div class="l2-bubbles">
+        ${['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'b10', 'b11', 'b12', 'b13', 'b14']
+          .map((b) => `<span class="l2-bubble ${b}"></span>`)
+          .join('')}
+      </div>
+      ${floatIcon('f1', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>')}
+      ${floatIcon('f2', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 6 9 17l-5-5"/></svg>')}
+      ${floatIcon('f3', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12" y="8" width="3" height="10"/><rect x="17" y="5" width="3" height="13"/></svg>')}
+      ${floatIcon('f4', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>')}
+      ${floatIcon('f5', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M12 7l1.6 3.4L17 12l-3.4 1.6L12 17l-1.6-3.4L7 12l3.4-1.6L12 7Z"/></svg>')}
+      ${floatIcon('f6', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2 4 5v6c0 5 3.5 8 8 11 4.5-3 8-6 8-11V5l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg>')}
+      ${floatIcon('f7', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg>')}
+      ${floatIcon('f8', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/></svg>')}
+      <div class="login2-brand"><div class="brand-icon">${BRAND_SVG}</div><span>PAGEFORMAT SYSTEM</span></div>
+      <div class="login2-hero-mid">
+        <div class="l2-hero-eyebrow">Multi-form workspace</div>
+        <h1>Every form,<br>one clean workspace.</h1>
+        <p>Capture, review and manage all your data forms in a single fast, modern place — built for your whole team.</p>
+      </div>
+      <div class="login2-hero-foot">
+        <span class="l2-dot"></span> Secure · Fast · Always in sync
+      </div>
+    </div>
+    <div class="login2-form-side">
+      <div class="login2-form">
+        ${
+          S.loginView === 'forgot'
+            ? `
+        <div class="login2-eyebrow">Account recovery</div>
+        <h2>Forgot password</h2>
+        <p class="login2-sub">Enter your User ID or email and we'll send your sign-in details.</p>
+        ${S.forgotError ? `<div class="login-error">${esc(S.forgotError)}</div>` : ''}
+        ${S.forgotOk ? `<div class="login-ok">${esc(S.forgotOk)}</div>` : ''}
+        <form id="forgotForm">
+          <div class="l2-field"><label>User ID or Email</label><div class="l2-input"><span class="l2-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></span><input type="text" id="forgotId" placeholder="e.g. ANKUR or you@company.com" required></div></div>
+          <button type="submit" class="btn btn-gold btn-block" ${S.forgotBusy ? 'disabled' : ''}>${S.forgotBusy ? 'Sending…' : 'Send my details'}</button>
+        </form>
+        <div class="l2-alt"><a data-action="show-login">← Back to sign in</a></div>`
+            : `
+        <div class="login2-eyebrow">Welcome back</div>
+        <h2>Sign in to continue</h2>
+        <p class="login2-sub">Enter your credentials to open your workspace.</p>
+        ${S.loginError ? `<div class="login-error">${esc(S.loginError)}</div>` : ''}
+        <form id="loginForm">
+          <div class="l2-field"><label>User ID</label><div class="l2-input ${S.loginInvalid ? 'invalid' : ''}"><span class="l2-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg></span><input type="text" id="loginId" data-login="id" value="${esc(S.loginId)}" autocomplete="username" placeholder="Enter your ID" required></div></div>
+          <div class="l2-field"><label>Password</label><div class="l2-input ${S.loginInvalid ? 'invalid' : ''}"><span class="l2-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span><input type="password" id="loginPw" data-login="pw" value="${esc(S.loginPw)}" autocomplete="current-password" placeholder="••••••••" required><button type="button" class="l2-eye" data-action="toggle-pw" title="Show password">${EYE_SVG}</button></div></div>
+          <button type="submit" class="btn btn-gold btn-block" ${S.loggingIn ? 'disabled' : ''}>${S.loggingIn ? 'Signing in…' : 'Sign In'}</button>
+        </form>
+        <div class="l2-alt"><a data-action="show-forgot">Forgot password?</a></div>
+        <div class="login2-hint">Access is set on the <b>LOGIN PAGE</b> sheet — the forms marked <b>YES</b> are the ones you'll see.</div>`
+        }
+      </div>
+    </div>
+  </div>`;
+  }
+  function firstAllowedPage() {
+    const f = allNavItems().find((n) => S.user && S.user[n.perm]);
+    return f ? f.key : null;
+  }
+  async function doLogin(id, pw) {
+    // Checked on the SERVER against the live sheet — so a password changed
+    // elsewhere (e.g. a temp password just emailed) works immediately, and no
+    // password is ever held in the browser.
+    S.loginError = '';
+    S.loginInvalid = false;
+    S.loginId = id; // keep what was submitted so the fields don't blank mid-submit
+    S.loginPw = pw;
+    S.loggingIn = true;
+    render();
+    let res;
+    try {
+      res = await runServer('authenticate', id, pw);
+    } catch (err) {
+      S.loggingIn = false;
+      S.loginInvalid = true;
+      S.loginError = err.message;
+      render();
+      return;
+    }
+    S.loggingIn = false;
+    if (!res || !res.success) {
+      S.loginInvalid = true; // highlight both fields, keep the entered values
+      S.loginError = (res && res.message) || 'Invalid User ID or password. Please check and try again.';
+      render();
+      return;
+    }
+    const u = res.user;
+    S.user = u;
+    // Success — clear the credentials from the form/state.
+    S.loginId = '';
+    S.loginPw = '';
+    S.loginInvalid = false;
+    S.loginError = '';
+    S.dataReady = false; // reset so a re-login after logout shows loading, not stale data
+    S.sidebarOpenSections = new Set();
+    S.logoutAt = nextLogoutTs();
+    S.page = 'dashboard'; // always land somewhere meaningful, never a random form
+    render(); // shows the clean "Loading data…" state (dataReady is false) — no empty flash
+    // ONE batch loads every sheet this user has YES for (getBootstrapData is
+    // perms-gated) and refreshes perms from the same call. No extra round-trip.
+    await loadHeavyData();
+    // Signed in with an emailed temporary password -> send them straight to
+    // Profile to set a real one.
+    if (S.user && S.user.mustChangePassword) {
+      S.pwForm = { current: '', next: '', confirm: '', busy: false, error: '', ok: '' };
+      S.page = 'profile';
+    }
+    render();
+  }
+
+  /* ============================= ACCOUNT ============================= */
+  async function doForgotPassword(needle) {
+    if (S.forgotBusy) return;
+    const who = String(needle || '').trim();
+    if (!who) {
+      S.forgotError = 'Please enter your User ID or email.';
+      S.forgotOk = '';
+      render();
+      return;
+    }
+    S.forgotBusy = true;
+    S.forgotError = '';
+    S.forgotOk = '';
+    render();
+    try {
+      const res = await runServer('requestPasswordReset', who);
+      if (res && res.success) {
+        S.forgotOk = res.message || 'Sent.';
+        S.forgotError = '';
+      } else {
+        S.forgotError = (res && res.message) || 'Could not send the email.';
+      }
+    } catch (err) {
+      S.forgotError = err.message;
+    }
+    S.forgotBusy = false;
+    render();
+  }
+
+  async function doChangePassword() {
+    const F = S.pwForm;
+    if (F.busy) return;
+    F.error = '';
+    F.ok = '';
+    const cur = String(F.current || '').trim();
+    const next = String(F.next || '').trim();
+    const conf = String(F.confirm || '').trim();
+    if (!cur || !next || !conf) {
+      F.error = 'Please fill all three fields.';
+      render();
+      return;
+    }
+    if (next.length < 3) {
+      F.error = 'New password must be at least 3 characters.';
+      render();
+      return;
+    }
+    if (next !== conf) {
+      F.error = 'New password and confirm password do not match.';
+      render();
+      return;
+    }
+    F.busy = true;
+    render();
+    try {
+      const res = await runServer('changePassword', {
+        id: S.user.id,
+        currentPassword: cur,
+        newPassword: next,
+      });
+      if (res && res.success) {
+        F.ok = res.message || 'Password changed.';
+        F.current = F.next = F.confirm = '';
+        // No longer a temporary password — drop the forced-change banner.
+        if (S.user) S.user.mustChangePassword = false;
+        showToast('Password changed successfully.', false);
+      } else {
+        F.error = (res && res.message) || 'Could not change the password.';
+      }
+    } catch (err) {
+      F.error = err.message;
+    }
+    F.busy = false;
+    render();
+  }
+
+  /* ============================= DASHBOARD ============================= */
+  // One card per nav GROUP the user can reach; each opens that group's first
+  // allowed page. Keeps the landing page useful instead of dumping the user
+  // into a random form.
+  const DASH_CARDS = [
+    {
+      group: 'Entry',
+      title: 'Margin Entry',
+      desc: 'Create and submit daily equity & commodity margin entries.',
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+    },
+    {
+      group: 'Response 1',
+      title: 'Response 1',
+      desc: 'Review submitted margin responses by code, user and software.',
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg>',
+    },
+    {
+      group: 'Response 2',
+      title: 'Response 2',
+      desc: 'Track group-level margin totals at a glance.',
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/><path d="m7 14 3-3 3 3 5-6"/></svg>',
+    },
+    {
+      group: 'Master',
+      title: 'Master Data',
+      desc: 'Maintain the master list of codes, users, groups and branches.',
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
+    },
+    {
+      group: 'Report',
+      title: 'Reports',
+      desc: 'Analyse margin activity across dates, groups and segments.',
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>',
+    },
+    {
+      group: 'IT Details',
+      title: 'IT Details',
+      desc: 'Manage IT user records, IDs, exchanges and allocations.',
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>',
+    },
+  ];
+
+  // Stat tiles: a headline number is the right form here (no plot), so each tile
+  // is a value + label, never a chart. All tiles share the single brand accent —
+  // giving each its own hue would imply a categorical encoding that doesn't
+  // exist. Numbers/labels stay in text tokens.
+  function dashStats() {
+    const u = S.user || {};
+    const n = (v) => (v || 0).toLocaleString('en-IN');
+    const out = [];
+    if (u.masterEquity || u.equityEntry || u.masterEquityAdd)
+      out.push({ label: 'Master · Equity', value: n(S.masterEquity.length), sub: 'records' });
+    if (u.masterCommodity || u.commodityEntry || u.masterCommodityAdd)
+      out.push({ label: 'Master · Commodity', value: n(S.masterCommodity.length), sub: 'records' });
+    if (u.resp1Equity || u.resp1Commodity || u.report)
+      out.push({
+        label: 'Margin Responses',
+        value: n(S.respEquity.length + S.respCommodity.length),
+        sub: 'entries',
+      });
+    if (u.resp2Equity || u.resp2Commodity || u.report)
+      out.push({
+        label: 'Group Margins',
+        value: n(S.resp2Equity.length + S.resp2Commodity.length),
+        sub: 'entries',
+      });
+    if (u.itDetails) {
+      const uniqueH = S.itDetails.loaded ? itUniqueNoHeader() : '';
+      const rows = (S.itDetails.rows || []).filter((r) => uniqueH && String(r[uniqueH] || '').trim());
+      out.push({ label: 'IT Records', value: n(rows.length), sub: 'saved' });
+    }
+    return out;
+  }
+
+  function renderDashboard() {
+    const u = S.user || {};
+    const cards = DASH_CARDS.map((c) => {
+      const item = allNavItems().find((n) => n.group === c.group && u[n.perm]);
+      if (!item) return '';
+      return `<div class="dash-card" data-action="nav" data-page="${item.key}">
+        <div class="dash-ic">${c.icon}</div>
+        <h3>${esc(c.title)}</h3>
+        <p>${esc(c.desc)}</p>
+        <span class="dash-go">Open <b>→</b></span>
+      </div>`;
+    }).join('');
+    const stats = dashStats();
+    const statsHtml = stats.length
+      ? `<div class="dash-stats">${stats
+          .map(
+            (s) => `<div class="stat-tile">
+              <div class="stat-value">${esc(s.value)}</div>
+              <div class="stat-label">${esc(s.label)}</div>
+              <div class="stat-sub">${esc(s.sub)}</div>
+            </div>`
+          )
+          .join('')}</div>`
+      : '';
+    const moduleCount = stats.length ? DASH_CARDS.filter((c) => allNavItems().some((n) => n.group === c.group && u[n.perm])).length : 0;
+    return `<div class="dash-wrap">
+      <div class="dash-hero">
+        <div class="dash-hero-text">
+          <div class="dash-eyebrow">Pageformat System · Workspace</div>
+          <h1>Welcome back, <span>${esc(u.name || '')}</span> 👋</h1>
+          <p>Every form, record and report your team needs — in one fast, permission-aware workspace. You have <b>${moduleCount}</b> module${moduleCount === 1 ? '' : 's'} available.</p>
+          <div class="dash-chips">
+            <span class="dash-chip"><i></i> Live sheet sync</span>
+            <span class="dash-chip"><i></i> Full audit trail</span>
+            <span class="dash-chip"><i></i> Role-based access</span>
+          </div>
+        </div>
+        <div class="dash-hero-art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 3v18h18"/><path d="m7 15 3.5-4 3 2.5L21 6"/></svg>
+        </div>
+      </div>
+      ${statsHtml}
+      ${
+        cards
+          ? `<div class="dash-sec-label">Your modules</div><div class="dash-grid">${cards}</div>`
+          : `<div class="empty-state"><div class="big">No modules assigned yet</div>Ask your administrator to mark a column <b>YES</b> for your ID on the LOGIN PAGE sheet.</div>`
+      }
+    </div>`;
+  }
+
+  function renderAppearancePage() {
+    const A = S.appearance || { mode: 'system', accent: 'random' };
+    const modes = [
+      { key: 'dark', label: 'Dark', desc: 'Easy on the eyes, great for night work', ic: '🌙' },
+      { key: 'light', label: 'Light', desc: 'Clean and bright, ideal for daylight', ic: '☀️' },
+      { key: 'system', label: 'System', desc: 'Follows your OS light / dark preference', ic: '💻' },
+    ];
+    const modeCards = modes
+      .map(
+        (m) => `<div class="apx-mode ${A.mode === m.key ? 'on' : ''}" data-action="set-mode" data-mode="${m.key}">
+        <div class="apx-mini apx-mini-${m.key}"><span></span><span></span><span></span></div>
+        <div class="apx-mode-label">${m.ic} ${m.label}</div>
+        <div class="apx-mode-desc">${m.desc}</div>
+      </div>`
+      )
+      .join('');
+
+    const randomOn = A.accent === 'random';
+    const randomCard = `<div class="apx-accent apx-accent-random ${randomOn ? 'on' : ''}" data-action="set-accent" data-accent="random">
+        <span class="apx-swatch apx-swatch-rainbow"></span>
+        <span class="apx-accent-txt"><b>Surprise me</b><small>A new colour every login</small></span>
+        ${randomOn ? '<span class="apx-check">✓</span>' : ''}
+      </div>`;
+    const accentCards = (window.ACCENT_SCHEMES || [])
+      .map((s) => {
+        const on = A.accent === s.key;
+        return `<div class="apx-accent ${on ? 'on' : ''}" data-action="set-accent" data-accent="${s.key}">
+          <span class="apx-swatch" style="background:${accentSwatch(s.hex, s.hex2)}"></span>
+          <span class="apx-accent-txt">${esc(s.label)}</span>
+          ${on ? '<span class="apx-check">✓</span>' : ''}
+        </div>`;
+      })
+      .join('');
+
+    return `<div class="apx-wrap">
+      <div class="apx-card">
+        <div class="apx-head"><h3>🌗 Display Mode</h3><p>Controls the overall brightness of the interface.</p></div>
+        <div class="apx-modes">${modeCards}</div>
+      </div>
+      <div class="apx-card">
+        <div class="apx-head"><h3>🎨 Colour Scheme</h3><p>Applies to buttons, active states, glows and highlights across the whole app and the login page.</p></div>
+        <div class="apx-accents">${randomCard}${accentCards}</div>
+        <div class="apx-preview">
+          <div class="apx-preview-lbl">Live preview</div>
+          <div class="apx-preview-row">
+            <button class="btn btn-gold" style="pointer-events:none;">Primary Button</button>
+            <span class="apx-badge">Active Badge</span>
+            <span class="apx-bar"><i></i></span>
+            <span class="apx-link">● Active Link</span>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function renderProfilePage() {
+    const u = S.user || {};
+    const initials = (u.name || 'U').substring(0, 2).toUpperCase();
+    const F = S.pwForm;
+    return `<div class="prof-wrap">
+      <div class="prof-card prof-id">
+        <div class="prof-avatar">${initials}</div>
+        <div class="prof-meta">
+          <div class="prof-name">${esc(u.name || '')}</div>
+          <div class="prof-rows">
+            <div class="prof-row"><span>Login ID</span><b>${esc(u.id || '—')}</b></div>
+            <div class="prof-row"><span>Email</span><b>${esc(u.email || 'Not set')}</b></div>
+          </div>
+        </div>
+      </div>
+      <div class="prof-card">
+        <div class="prof-card-head">
+          <h3>Change Password</h3>
+          <p>Use at least 3 characters. You'll keep using the same User ID.</p>
+        </div>
+        ${
+          u.mustChangePassword
+            ? `<div class="prof-warn"><b>You're signed in with a temporary password.</b> Please set a new password now to secure your account.</div>`
+            : ''
+        }
+        ${F.error ? `<div class="login-error">${esc(F.error)}</div>` : ''}
+        ${F.ok ? `<div class="login-ok">${esc(F.ok)}</div>` : ''}
+        <form id="pwForm">
+          <div class="l2-field"><label>Current Password</label><div class="l2-input"><span class="l2-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span><input type="password" data-pw="current" value="${esc(F.current)}" placeholder="Enter current password" autocomplete="current-password"><button type="button" class="l2-eye" data-action="toggle-pw" title="Show password">${EYE_SVG}</button></div></div>
+          <div class="l2-field"><label>New Password</label><div class="l2-input"><span class="l2-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span><input type="password" data-pw="next" value="${esc(F.next)}" placeholder="Enter new password" autocomplete="new-password"><button type="button" class="l2-eye" data-action="toggle-pw" title="Show password">${EYE_SVG}</button></div></div>
+          <div class="l2-field"><label>Confirm New Password</label><div class="l2-input"><span class="l2-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg></span><input type="password" data-pw="confirm" value="${esc(F.confirm)}" placeholder="Re-enter new password" autocomplete="new-password"><button type="button" class="l2-eye" data-action="toggle-pw" title="Show password">${EYE_SVG}</button></div></div>
+          <button type="submit" class="btn btn-gold" ${F.busy ? 'disabled' : ''}>${F.busy ? 'Saving…' : 'Update Password'}</button>
+        </form>
+      </div>
+    </div>`;
+  }
+
+  /* ============================= NAV ============================= */
+  const NAV_ITEMS = [
+    { key: 'entryEquity', label: 'Equity Entry', group: 'Entry', perm: 'equityEntry' },
+    { key: 'entryCommodity', label: 'Commodity Entry', group: 'Entry', perm: 'commodityEntry' },
+    { key: 'resp1Equity', label: 'Response 1 · Equity', group: 'Response 1', perm: 'resp1Equity' },
+    {
+      key: 'resp1Commodity',
+      label: 'Response 1 · Commodity',
+      group: 'Response 1',
+      perm: 'resp1Commodity',
+    },
+    { key: 'resp2Equity', label: 'Response 2 · Equity', group: 'Response 2', perm: 'resp2Equity' },
+    {
+      key: 'resp2Commodity',
+      label: 'Response 2 · Commodity',
+      group: 'Response 2',
+      perm: 'resp2Commodity',
+    },
+    { key: 'masterEquity', label: 'Master · Equity', group: 'Master', perm: 'masterEquity' },
+    {
+      key: 'masterCommodity',
+      label: 'Master · Commodity',
+      group: 'Master',
+      perm: 'masterCommodity',
+    },
+    { key: 'reportEquity', label: 'Report · Equity', group: 'Report', perm: 'report' },
+    { key: 'reportCommodity', label: 'Report · Commodity', group: 'Report', perm: 'report' },
+  ];
+  const IT_NAV_ITEMS = [
+    { key: 'itDetails', label: 'IT Details', group: 'IT Details', perm: 'itDetails' },
+    { key: 'backoffice', label: 'Backoffice Code', group: 'IT Details', perm: 'itDetails' },
+    { key: 'marginEntry', label: 'Margin Entry', group: 'IT Details', perm: 'itDetails' },
+  ];
+  // Sidebar sections. Each is its own collapsible nav-parent. A future
+  // project just needs its own item list added here (plus a permission field
+  // in mapUser_ and a page renderer) — no other sidebar code changes.
+  const NAV_SECTIONS = [
+    {
+      key: 'margin',
+      label: 'MARGIN',
+      icon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>`,
+      items: NAV_ITEMS,
+    },
+    {
+      key: 'itdetails',
+      label: 'IT DETAILS',
+      icon: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-4"/><rect x="9" y="1" width="6" height="4" rx="1"/></svg>`,
+      items: IT_NAV_ITEMS,
+    },
+  ];
+  function allNavItems() {
+    return NAV_SECTIONS.reduce((acc, s) => acc.concat(s.items), []);
+  }
+  const PAGE_TITLES = {
+    entryEquity: 'Equity — Margin Entry',
+    entryCommodity: 'Commodity — Margin Entry',
+    resp1Equity: 'Response 1',
+    resp1Commodity: 'Response 1',
+    resp2Equity: 'Response 2',
+    resp2Commodity: 'Response 2',
+    masterEquity: 'Master Data',
+    masterCommodity: 'Master Data',
+    reportEquity: 'Report',
+    reportCommodity: 'Report',
+    itDetails: 'IT Details',
+    backoffice: 'Backoffice Code',
+    marginEntry: 'Margin Entry',
+    profile: 'My Profile',
+    appearance: 'Appearance',
+    dashboard: 'Dashboard',
+  };
+  function segOfPage(k) {
+    return /Commodity$/.test(k) ? 'commodity' : /Equity$/.test(k) ? 'equity' : null;
+  }
+
+  /* ============================= SHELL ============================= */
+  // Desktop "collapsed rail" is ignored on mobile (the sidebar is a drawer there).
+  function isMobileView() {
+    return window.innerWidth <= 860;
+  }
+  function renderShell(inner) {
+    const initials = (S.user.name || 'U').substring(0, 2).toUpperCase();
+    const pageSeg = segOfPage(S.page);
+    const sectionsHtml = NAV_SECTIONS.map((section) => {
+      const items = section.items.filter((n) => S.user[n.perm]);
+      if (!items.length) return '';
+      let childHtml = '';
+      let lastGroup = null;
+      // Only show group sub-labels when a section actually has MORE than one
+      // group — otherwise the single group label just duplicates the section
+      // title (e.g. "IT DETAILS" > "IT DETAILS" > "IT Details").
+      const showGroups = new Set(items.map((n) => n.group)).size > 1;
+      items.forEach((n) => {
+        if (showGroups && n.group !== lastGroup) {
+          childHtml += `<div class="nav-group-label">${esc(n.group)}</div>`;
+          lastGroup = n.group;
+        }
+        childHtml += `<div class="nav-child ${S.page === n.key ? 'active' : ''}" data-action="nav" data-page="${n.key}">${esc(n.label)}</div>`;
+      });
+      const open = S.sidebarOpenSections.has(section.key);
+      return `<div class="nav-section">
+        <div class="nav-parent ${open ? 'open' : ''}" data-action="toggle-sidebar" data-section="${section.key}">
+          <span class="p-icon">${section.icon}</span>
+          <span class="p-label">${esc(section.label)}</span>
+          <span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+        </div>
+        <div class="nav-children ${open ? 'show' : ''}">${childHtml}</div>
+      </div>`;
+    }).join('');
+    return `
+  <div class="shell">
+    <div class="sidebar-backdrop ${S.sidebarDrawerOpen ? 'show' : ''}" data-action="close-drawer"></div>
+    <div class="sidebar ${S.sidebarCollapsed && !isMobileView() ? 'collapsed' : ''} ${S.sidebarDrawerOpen ? 'drawer-open' : ''}">
+      <div class="brand">
+        <div class="brand-icon" data-action="nav" data-page="dashboard" title="Go to dashboard">${BRAND_SVG}</div>
+        <div class="brand-text" data-action="nav" data-page="dashboard" title="Go to dashboard"><h1>PAGEFORMAT<span>SYSTEM</span></h1></div>
+        <button class="side-collapse" data-action="toggle-collapse" title="Collapse sidebar"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      </div>
+      <div class="nav">${sectionsHtml || '<div class="nav-empty">No pages assigned. Contact admin.</div>'}</div>
+      <div class="sidebar-foot">
+        <div class="logout-btn" data-action="syncnow" title="Refresh from Sheet"><svg class="sync-ic ${S.bgSyncing || S.syncing ? 'sync-spin' : ''}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg><span class="lb-text sync-label">${S.bgSyncing ? 'Syncing data…' : S.syncing ? 'Refreshing…' : 'Refresh from Sheet'}</span></div>
+        <div class="logout-btn danger" data-action="logout" title="Sign Out"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span class="lb-text">Sign Out</span></div>
+      </div>
+    </div>
+    <div class="main">
+      <div class="topbar">
+        <div class="topbar-left">
+          <button class="topbar-hamburger" data-action="toggle-drawer" title="Menu" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+          <h2>${PAGE_TITLES[S.page] || 'Dashboard'}</h2>${pageSeg ? `<span class="seg-badge ${pageSeg}">${pageSeg}</span>` : ''}
+        </div>
+        <div class="topbar-right">
+          <div class="topbar-controls"><button data-action="font-down" title="Smaller text">A-</button><button data-action="font-reset" title="Reset size">A</button><button data-action="font-up" title="Larger text">A+</button></div>
+          <div class="topbar-clock" id="liveClock">${lastClockText || '--:--:--'}</div>
+          <div class="profile-wrap">
+            <button class="profile-btn ${S.profileMenuOpen ? 'open' : ''}" data-action="toggle-profile">
+              <div class="avatar">${initials}</div>
+              <div class="profile-meta"><span class="profile-name">${esc(S.user.name)}</span><span class="profile-role">${esc(S.user.id || '')}</span></div>
+              <span class="profile-caret">▾</span>
+            </button>
+            ${
+              S.profileMenuOpen
+                ? `<div class="profile-menu">
+              <div class="profile-menu-head"><div class="avatar lg">${initials}</div><div class="pm-info"><div class="pm-name">${esc(S.user.name)}</div><div class="pm-id">${esc(S.user.id || '')}</div></div></div>
+              <div class="profile-menu-item" data-action="open-profile"><span class="pm-ic">👤</span>My Profile</div>
+              <div class="profile-menu-item" data-action="nav-appearance"><span class="pm-ic">🎨</span>Appearance</div>
+              <div class="profile-menu-item" data-action="syncnow"><span class="pm-ic"><svg class="sync-ic ${S.bgSyncing || S.syncing ? 'sync-spin' : ''}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg></span><span class="sync-label">${S.bgSyncing ? 'Syncing data…' : S.syncing ? 'Refreshing…' : 'Refresh from Sheet'}</span></div>
+              <div class="profile-menu-item pm-fontrow"><span class="pm-ic">🔤</span>Text size<span class="pm-font-btns"><button data-action="font-down" title="Smaller">A-</button><button data-action="font-reset" title="Reset">A</button><button data-action="font-up" title="Larger">A+</button></span></div>
+              <div class="profile-menu-sep"></div>
+              <div class="profile-menu-item danger" data-action="logout"><span class="pm-ic">⎋</span>Sign Out</div>
+            </div>`
+                : ''
+            }
+          </div>
+        </div>
+      </div>
+      <div class="content">${inner}</div>
+    </div>
+  </div>
+  ${S.toast ? `<div class="toast ${S.toast.isErr ? 'err' : ''}"><span>${S.toast.isErr ? '⚠' : '✓'}</span>${esc(S.toast.msg)}</div>` : ''}
+  ${
+    S.showLogoutConfirm
+      ? `<div class="cdlg-overlay">
+    <div class="cdlg">
+      <div class="cdlg-icon">⎋</div>
+      <div class="cdlg-title">Sign out?</div>
+      <div class="cdlg-msg">You'll need your User ID and password to sign back in.</div>
+      <div class="cdlg-actions">
+        <button class="btn btn-ghost" data-action="logout-cancel">Cancel</button>
+        <button class="btn btn-gold" data-action="logout-confirm">Sign Out</button>
+      </div>
+    </div>
+  </div>`
+      : ''
+  }`;
+  }
+
+  /* ============================= NAV ACTION ============================= */
+  async function navigateTo(pageKey) {
+    S.colMenuOpen = null;
+    S.sidebarDrawerOpen = false; // close the mobile drawer on navigation
+    S.page = pageKey;
+    render();
+    if (pageKey === 'itDetails' || pageKey === 'backoffice' || pageKey === 'marginEntry')
+      ensureITDetailsLoaded();
+    try {
+      const fresh = await runServer('getUserPermissions', S.user.id);
+      if (fresh) {
+        S.user = Object.assign({}, S.user, fresh);
+        const pk = allNavItems().find((n) => n.key === S.page)?.perm;
+        if (pk && !S.user[pk]) {
+          showToast('Ye page ab aapke liye uplabdh nahi hai.', true);
+          S.page = firstAllowedPage();
+        }
+        render();
+      }
+    } catch (e) {}
+  }
+
+  /* ============================= EVENTS ============================= */
+  let resizeCtx = null,
+    rowResizeCtx = null,
+    eResizeCtx = null,
+    filterTimer = null,
+    spSearchTimer = null,
+    regSearchTimer = null;
+  document.addEventListener('submit', (e) => {
+    if (e.target && e.target.id === 'loginForm') {
+      e.preventDefault();
+      doLogin(document.getElementById('loginId').value, document.getElementById('loginPw').value);
+      return;
+    }
+    if (e.target && e.target.id === 'forgotForm') {
+      e.preventDefault();
+      const el = document.getElementById('forgotId');
+      doForgotPassword(el ? el.value : '');
+      return;
+    }
+    if (e.target && e.target.id === 'pwForm') {
+      e.preventDefault();
+      doChangePassword();
+      return;
+    }
+  });
+
+  document.addEventListener('focusout', (e) => {
+    const el = e.target;
+    if (el.hasAttribute('data-a')) {
+      const f = el.getAttribute('data-a');
+      if (f === 'code' || CASCADE_FIELDS.indexOf(f) !== -1) {
+        setTimeout(() => render(), 100);
+      }
+    }
+  });
+
+  document.addEventListener('input', (e) => {
+    const el = e.target;
+    if (el.classList.contains('cell-error') && el.value) {
+      el.classList.remove('cell-error');
+      el.style.borderColor = '';
+      el.style.background = '';
+    }
+    // Login fields: keep typed values in state (so a re-render during "Signing
+    // in…" or after an error never wipes them) and clear the invalid highlight.
+    if (el.hasAttribute('data-login')) {
+      if (el.getAttribute('data-login') === 'id') S.loginId = el.value;
+      else S.loginPw = el.value;
+      if (S.loginInvalid) {
+        S.loginInvalid = false;
+        document.querySelectorAll('.login2-form .l2-input.invalid').forEach((n) => n.classList.remove('invalid'));
+      }
+      return;
+    }
+    if (el.hasAttribute('data-a') || el.hasAttribute('data-b')) {
+      onEntryFieldInput(el);
+      return;
+    }
+    if (el.hasAttribute('data-madd')) {
+      onMasterAddInput(el);
+      return;
+    }
+    if (el.hasAttribute('data-pw')) {
+      // Change-password fields: keep state in sync WITHOUT re-rendering (a
+      // re-render would blow away focus and the typed value).
+      S.pwForm[el.getAttribute('data-pw')] = el.value;
+      return;
+    }
+    if (el.hasAttribute('data-itfield')) {
+      onItFieldInput(el);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'sp-search') {
+      const key = el.getAttribute('data-sp');
+      S.itForm.pickerQuery = el.value;
+      clearTimeout(spSearchTimer);
+      spSearchTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(`input[data-action="sp-search"][data-sp="${key}"]`);
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 200);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'reg-search') {
+      S.itForm.regQuery = el.value;
+      clearTimeout(regSearchTimer);
+      regSearchTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector('input[data-action="reg-search"]');
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 200);
+      return;
+    }
+    if (el.hasAttribute('data-bo')) {
+      // Backoffice code/remark inputs — update state without a re-render so the
+      // typed value and cursor aren't wiped.
+      S.boForm[el.getAttribute('data-bo')] = el.value;
+      if (el.classList.contains('cell-error') && el.value) el.classList.remove('cell-error');
+      return;
+    }
+    if (
+      el.getAttribute('data-action') === 'bo-usearch' ||
+      el.getAttribute('data-action') === 'bo-fsearch'
+    ) {
+      const act = el.getAttribute('data-action');
+      S.boForm[act === 'bo-usearch' ? 'uQuery' : 'fQuery'] = el.value;
+      clearTimeout(regSearchTimer);
+      regSearchTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(`input[data-action="${act}"]`);
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 200);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'bo-colsearch') {
+      const col = el.getAttribute('data-bocol');
+      S.boForm.search[col] = el.value;
+      S.boForm.page = 1;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(`input[data-action="bo-colsearch"][data-bocol="${col}"]`);
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 250);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'bo-globalsearch') {
+      S.boForm.globalQuery = el.value;
+      S.boForm.page = 1;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector('input[data-action="bo-globalsearch"]');
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 250);
+      return;
+    }
+    /* ---- Margin Entry inputs (mirrors the Backoffice ones) ---- */
+    if (el.hasAttribute('data-mg') && el.tagName !== 'SELECT') {
+      const mgKey = el.getAttribute('data-mg');
+      // Numeric fields: live Indian-format the display, store the raw number.
+      if (MG_NUMERIC_KEYS.indexOf(mgKey) > -1) {
+        S.mgForm[mgKey] = mgReformatInput(el);
+      } else {
+        S.mgForm[mgKey] = el.value;
+      }
+      if (el.classList.contains('cell-error') && el.value) el.classList.remove('cell-error');
+      return;
+    }
+    if (
+      el.getAttribute('data-action') === 'mg-usearch' ||
+      el.getAttribute('data-action') === 'mg-fsearch'
+    ) {
+      const act = el.getAttribute('data-action');
+      S.mgForm[act === 'mg-usearch' ? 'uQuery' : 'fQuery'] = el.value;
+      clearTimeout(regSearchTimer);
+      regSearchTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(`input[data-action="${act}"]`);
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 200);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'mg-colsearch') {
+      const col = el.getAttribute('data-mgcol');
+      S.mgForm.search[col] = el.value;
+      S.mgForm.page = 1;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(`input[data-action="mg-colsearch"][data-mgcol="${col}"]`);
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 250);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'mg-globalsearch') {
+      S.mgForm.globalQuery = el.value;
+      S.mgForm.page = 1;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector('input[data-action="mg-globalsearch"]');
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 250);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'editpick-search') {
+      S.itForm.editPickQuery = el.value;
+      clearTimeout(regSearchTimer);
+      regSearchTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector('input[data-action="editpick-search"]');
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 200);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'rpt-search') {
+      const col = el.getAttribute('data-col');
+      if (col) {
+        S.report['f_' + col] = el.value;
+      } else {
+        S.report.search = el.value;
+      }
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = col
+          ? document.querySelector(`input[data-action="rpt-search"][data-col="${col}"]`)
+          : document.querySelector('input[data-action="rpt-search"]:not([data-col])');
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 300);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'dt-globalsearch') {
+      const t = el.getAttribute('data-table');
+      S.dt[t].globalSearch = el.value;
+      S.dt[t].page = 1;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(`input[data-action="dt-globalsearch"][data-table="${t}"]`);
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 250);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'filter') {
+      const t = el.getAttribute('data-table'),
+        c = el.getAttribute('data-col');
+      S.dt[t].filters[c] = el.value;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        S.dt[t].page = 1;
+        const pos = el.selectionStart;
+        render();
+        const ag = document.querySelector(
+          `input[data-action="filter"][data-table="${t}"][data-col="${c}"]`
+        );
+        if (ag) {
+          ag.focus();
+          ag.setSelectionRange(pos, pos);
+        }
+      }, 350);
+    }
+  });
+
+  document.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.tagName === 'SELECT' && (el.hasAttribute('data-a') || el.hasAttribute('data-b'))) {
+      onEntryFieldInput(el);
+      return;
+    }
+    if (el.hasAttribute('data-itfield')) {
+      onItFieldInput(el);
+      return;
+    }
+    // IT Details form: Surrender YES/NO dropdown.
+    if (el.hasAttribute('data-itsurrender')) {
+      if (S.itForm) S.itForm.surrender = el.value === 'YES' ? 'YES' : 'NO';
+      render();
+      return;
+    }
+    if (el.getAttribute('data-action') === 'dt-statusfilter') {
+      const t = el.getAttribute('data-table');
+      S.dt[t].statusFilter = el.value;
+      S.dt[t].page = 1;
+      render();
+      return;
+    }
+    if (el.getAttribute('data-action') === 'pagesize') {
+      const t = el.getAttribute('data-table');
+      S.dt[t].pageSize = parseInt(el.value, 10);
+      S.dt[t].page = 1;
+      render();
+    }
+    if (el.getAttribute('data-action') === 'bo-pagesize') {
+      onBoPageSize(el.value);
+      return;
+    }
+    if (el.getAttribute('data-action') === 'mg-pagesize') {
+      onMgPageSize(el.value);
+      return;
+    }
+    // Intraday / Slice Allowed YES/NO dropdowns in the Margin Entry form.
+    if (el.tagName === 'SELECT' && el.hasAttribute('data-mg')) {
+      S.mgForm[el.getAttribute('data-mg')] = el.value;
+      if (el.classList.contains('cell-error') && el.value) el.classList.remove('cell-error');
+      return;
+    }
+    if (el.getAttribute('data-action') === 'rpt-month') {
+      S.report.month = parseInt(el.value, 10);
+      render();
+    }
+    if (el.getAttribute('data-action') === 'rpt-year') {
+      S.report.year = parseInt(el.value, 10);
+      render();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const a = el.getAttribute('data-action');
+    if (a === 'toggle-collapse') {
+      S.sidebarCollapsed = !S.sidebarCollapsed;
+      try {
+        localStorage.setItem('margin_sidebar_collapsed', S.sidebarCollapsed ? 'true' : 'false');
+      } catch (e) {}
+      // Toggle the class on the LIVE sidebar so the width transition animates
+      // (a full re-render would recreate the node and skip the animation).
+      const sb = document.querySelector('.sidebar');
+      if (sb) sb.classList.toggle('collapsed', S.sidebarCollapsed);
+      return;
+    }
+    // Mobile drawer: slide the sidebar in/out over the page (live DOM toggle so
+    // the transform animates; no full re-render).
+    if (a === 'toggle-drawer' || a === 'close-drawer') {
+      S.sidebarDrawerOpen = a === 'close-drawer' ? false : !S.sidebarDrawerOpen;
+      const sb = document.querySelector('.sidebar');
+      const bd = document.querySelector('.sidebar-backdrop');
+      if (sb) sb.classList.toggle('drawer-open', S.sidebarDrawerOpen);
+      if (bd) bd.classList.toggle('show', S.sidebarDrawerOpen);
+      return;
+    }
+    if (a === 'toggle-sidebar') {
+      const sec = el.getAttribute('data-section');
+      // If collapsed, a click expands the rail back out and opens this section.
+      if (S.sidebarCollapsed) {
+        S.sidebarCollapsed = false;
+        S.sidebarOpenSections.add(sec);
+        try {
+          localStorage.setItem('margin_sidebar_collapsed', 'false');
+        } catch (e) {}
+        render();
+        return;
+      }
+      const willOpen = !S.sidebarOpenSections.has(sec);
+      if (willOpen) S.sidebarOpenSections.add(sec);
+      else S.sidebarOpenSections.delete(sec);
+      // Toggle the classes on the LIVE nodes (not a full re-render) so the
+      // CSS max-height/opacity transition actually animates in both directions.
+      el.classList.toggle('open', willOpen);
+      const panel = el.parentElement.querySelector('.nav-children');
+      if (panel) panel.classList.toggle('show', willOpen);
+      return;
+    }
+    if (a === 'toggle-theme') {
+      S.profileMenuOpen = false;
+      setAppearance({ mode: S.darkMode ? 'light' : 'dark' });
+      return;
+    }
+    if (a === 'nav-appearance') {
+      S.profileMenuOpen = false;
+      navigateTo('appearance');
+      return;
+    }
+    if (a === 'set-mode') {
+      setAppearance({ mode: el.getAttribute('data-mode') });
+      return;
+    }
+    if (a === 'set-accent') {
+      setAppearance({ accent: el.getAttribute('data-accent') });
+      return;
+    }
+    if (a === 'font-up') {
+      S.fontSize = Math.min(130, S.fontSize + 10);
+      applyFontZoom(S.fontSize);
+      saveFontSizePref();
+      return;
+    }
+    if (a === 'font-down') {
+      S.fontSize = Math.max(70, S.fontSize - 10);
+      applyFontZoom(S.fontSize);
+      saveFontSizePref();
+      return;
+    }
+    if (a === 'font-reset') {
+      S.fontSize = 100;
+      applyFontZoom(100);
+      saveFontSizePref();
+      return;
+    }
+    if (a === 'nav') {
+      navigateTo(el.getAttribute('data-page'));
+      return;
+    }
+    if (a === 'toggle-profile') {
+      S.profileMenuOpen = !S.profileMenuOpen;
+      render();
+      return;
+    }
+    if (a === 'toggle-pw') {
+      // Direct DOM toggle — re-rendering would wipe the typed value.
+      const wrap = el.closest('.l2-input');
+      const inp = wrap && wrap.querySelector('input');
+      if (inp) {
+        const show = inp.type === 'password';
+        inp.type = show ? 'text' : 'password';
+        el.classList.toggle('on', show);
+        el.title = show ? 'Hide password' : 'Show password';
+      }
+      return;
+    }
+    if (a === 'show-forgot') {
+      S.loginView = 'forgot';
+      S.forgotError = '';
+      S.forgotOk = '';
+      S.loginError = '';
+      render();
+      return;
+    }
+    if (a === 'show-login') {
+      S.loginView = 'login';
+      S.forgotError = '';
+      S.forgotOk = '';
+      render();
+      return;
+    }
+    if (a === 'open-profile') {
+      S.profileMenuOpen = false;
+      S.pwForm = { current: '', next: '', confirm: '', busy: false, error: '', ok: '' };
+      S.page = 'profile';
+      render();
+      return;
+    }
+    if (a === 'logout') {
+      // Ask first — custom confirm dialog, not the browser's.
+      S.profileMenuOpen = false;
+      S.showLogoutConfirm = true;
+      render();
+      return;
+    }
+    if (a === 'logout-cancel') {
+      S.showLogoutConfirm = false;
+      render();
+      return;
+    }
+    if (a === 'logout-confirm') {
+      stopAutoSync();
+      S.user = null;
+      S.page = null;
+      S.dataReady = false;
+      S.profileMenuOpen = false;
+      S.showLogoutConfirm = false;
+      S.sidebarOpenSections = new Set();
+      S.logoutAt = 0;
+      // If Surprise-me is on, roll a fresh random colour for the login page.
+      if (window.reshuffleAppearance) S.darkMode = window.reshuffleAppearance().resolvedDark;
+      render();
+      return;
+    }
+    if (a === 'syncnow') {
+      S.profileMenuOpen = false;
+      if (S.page === 'itDetails' || S.page === 'backoffice' || S.page === 'marginEntry')
+        refreshITDetails();
+      else refreshData();
+      return;
+    }
+    if (a === 'itdetails-refresh') {
+      refreshITDetails();
+      return;
+    }
+    if (a === 'itdetails-add') {
+      openItDetailsForm('add');
+      return;
+    }
+    if (a === 'bo-utoggle') {
+      onBoUToggle();
+      return;
+    }
+    if (a === 'bo-uchoose') {
+      onBoPickUnique(el.getAttribute('data-unique'));
+      return;
+    }
+    if (a === 'bo-uclear') {
+      S.boForm.picked = '';
+      S.boForm.code = '';
+      S.boForm.remark = '';
+      S.boForm.uOpen = false;
+      render();
+      return;
+    }
+    if (a === 'bo-ftoggle') {
+      onBoFToggle();
+      return;
+    }
+    if (a === 'bo-fchoose') {
+      onBoPickUser(el.getAttribute('data-uid'));
+      return;
+    }
+    if (a === 'bo-fclear') {
+      onBoUserClear();
+      return;
+    }
+    if (a === 'bo-row') {
+      onBoPickUnique(el.getAttribute('data-unique'));
+      return;
+    }
+    if (a === 'bo-save') {
+      saveBackofficeForm();
+      return;
+    }
+    if (a === 'bo-page') {
+      onBoPage(el.getAttribute('data-pg'));
+      return;
+    }
+    if (a === 'bo-togglesearch') {
+      onBoToggleSearch(el.getAttribute('data-bocol'));
+      return;
+    }
+    if (a === 'bo-globalclear') {
+      onBoGlobalClear();
+      return;
+    }
+    /* ---- Margin Entry actions ---- */
+    if (a === 'mg-utoggle') { onMgUToggle(); return; }
+    if (a === 'mg-uchoose') { onMgPickUnique(el.getAttribute('data-unique')); return; }
+    if (a === 'mg-uclear' || a === 'mg-clear') { mgClear(); return; }
+    if (a === 'mg-ftoggle') { onMgFToggle(); return; }
+    if (a === 'mg-fchoose') { onMgPickUser(el.getAttribute('data-uid')); return; }
+    if (a === 'mg-fclear') { onMgUserClear(); return; }
+    if (a === 'mg-row') { onMgPickUnique(el.getAttribute('data-unique')); return; }
+    if (a === 'mg-save') { saveMarginForm(); return; }
+    if (a === 'mg-page') { onMgPage(el.getAttribute('data-pg')); return; }
+    if (a === 'mg-togglesearch') { onMgToggleSearch(el.getAttribute('data-mgcol')); return; }
+    if (a === 'mg-globalclear') { onMgGlobalClear(); return; }
+    if (a === 'itdetails-edit') {
+      openItDetailsForm('edit');
+      return;
+    }
+    if (a === 'close-it-form') {
+      closeItDetailsForm();
+      return;
+    }
+    if (a === 'editpick-toggle') {
+      onEditPickToggle();
+      return;
+    }
+    if (a === 'editpick-choose') {
+      onEditPickChoose(el.getAttribute('data-unique'));
+      return;
+    }
+    if (a === 'save-it-form') {
+      saveItDetailsForm();
+      return;
+    }
+    if (a === 'sp-toggle') {
+      onItSpToggle(el.getAttribute('data-sp'));
+      return;
+    }
+    if (a === 'sp-pick') {
+      onItSelectPick(el);
+      return;
+    }
+    if (a === 'sp-clear') {
+      onItSpClear(el.getAttribute('data-sp'));
+      return;
+    }
+    if (a === 'reg-toggle') {
+      onRegToggle();
+      return;
+    }
+    if (a === 'reg-pick') {
+      onRegPick(el.getAttribute('data-unique'));
+      return;
+    }
+    if (a === 'reg-clear') {
+      onRegClear();
+      return;
+    }
+    if (a === 'add-a') {
+      addRowA();
+      return;
+    }
+    if (a === 'add-b') {
+      addRowB();
+      return;
+    }
+    if (a === 'del-a') {
+      delRowA(parseInt(el.getAttribute('data-i'), 10));
+      return;
+    }
+    if (a === 'del-b') {
+      delRowB(parseInt(el.getAttribute('data-i'), 10));
+      return;
+    }
+    if (a === 'submit-entry') {
+      submitEntry();
+      return;
+    }
+    if (a === 'sort') {
+      const t = el.getAttribute('data-table'),
+        c = el.getAttribute('data-col');
+      const st = S.dt[t];
+      if (st.sort === c) st.dir *= -1;
+      else {
+        st.sort = c;
+        st.dir = 1;
+      }
+      st.page = 1;
+      render();
+      return;
+    }
+    if (a === 'pagefirst') {
+      S.dt[el.getAttribute('data-table')].page = 1;
+      render();
+      return;
+    }
+    if (a === 'pageprev') {
+      const st = S.dt[el.getAttribute('data-table')];
+      st.page = Math.max(1, st.page - 1);
+      render();
+      return;
+    }
+    if (a === 'pagenext') {
+      S.dt[el.getAttribute('data-table')].page++;
+      render();
+      return;
+    }
+    if (a === 'pagelast') {
+      S.dt[el.getAttribute('data-table')].page = 999999;
+      render();
+      return;
+    }
+    if (a === 'togglesearch') {
+      const t = el.getAttribute('data-table'),
+        c = el.getAttribute('data-col');
+      const st = S.dt[t];
+      if (isDateColumn(c)) {
+        st.filterOpen = st.filterOpen === c ? null : c;
+        render();
+        if (st.filterOpen === c) openDateRange(t, c);
+        return;
+      }
+      st.filterOpen = st.filterOpen === c ? null : c;
+      render();
+      if (st.filterOpen) {
+        const inp = document.querySelector(
+          `input[data-action="filter"][data-table="${t}"][data-col="${c}"]`
+        );
+        if (inp) inp.focus();
+      }
+      return;
+    }
+    if (a === 'dt-globalclear') {
+      const t = el.getAttribute('data-table');
+      S.dt[t].globalSearch = '';
+      S.dt[t].page = 1;
+      render();
+      return;
+    }
+    if (a === 'togglecolmenu') {
+      const t = el.getAttribute('data-table');
+      S.colMenuOpen = S.colMenuOpen === t ? null : t;
+      render();
+      return;
+    }
+    if (a === 'togglecol') {
+      const t = el.getAttribute('data-table'),
+        c = el.getAttribute('data-col');
+      const st = S.dt[t];
+      if (st.hidden.has(c)) st.hidden.delete(c);
+      else st.hidden.add(c);
+      persistTablePref(t);
+      render();
+      S.colMenuOpen = t;
+      return;
+    }
+    if (a === 'open-master-add') {
+      openMasterAdd(el.getAttribute('data-seg'));
+      return;
+    }
+    if (a === 'close-master-add') {
+      closeMasterAdd();
+      return;
+    }
+    if (a === 'master-add-overlay') {
+      if (el === e.target) closeMasterAdd();
+      return;
+    }
+    if (a === 'save-master-add') {
+      saveMasterAdd();
+      return;
+    }
+    if (a === 'rpt-sort') {
+      const c = el.getAttribute('data-col');
+      if (S.report.sort === c) S.report.sortDir *= -1;
+      else {
+        S.report.sort = c;
+        S.report.sortDir = 1;
+      }
+      S.report.monthSort = null;
+      render();
+      return;
+    }
+    if (a === 'rpt-sort-month') {
+      const c = el.getAttribute('data-col');
+      if (S.report.monthSort === c) S.report.monthSortDir *= -1;
+      else {
+        S.report.monthSort = c;
+        S.report.monthSortDir = 1;
+      }
+      S.report.sort = null;
+      render();
+      return;
+    }
+    if (a === 'rpt-filter') {
+      S.report.filter = el.getAttribute('data-val');
+      render();
+      return;
+    }
+    if (a === 'open-daterange') {
+      openDateRange(el.getAttribute('data-table'), el.getAttribute('data-col'));
+      return;
+    }
+    if (a === 'clear-daterange') {
+      const t = el.getAttribute('data-table'),
+        c = el.getAttribute('data-col');
+      if (S.dt[t].dateFilters) delete S.dt[t].dateFilters[c];
+      S.dt[t].page = 1;
+      render();
+      return;
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.dt-colmenu-wrap') && S.colMenuOpen) {
+      S.colMenuOpen = null;
+      render();
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (e.target.isConnected && !e.target.closest('.profile-wrap') && S.profileMenuOpen) {
+      S.profileMenuOpen = false;
+      render();
+    }
+  });
+  // Close the logout confirm when clicking the dark backdrop (not the dialog).
+  document.addEventListener('click', (e) => {
+    if (S.showLogoutConfirm && e.target.classList && e.target.classList.contains('cdlg-overlay')) {
+      S.showLogoutConfirm = false;
+      render();
+    }
+  });
+  document.addEventListener('click', (e) => {
+    // e.target may already be detached (an earlier listener on this same
+    // click could have called render(), replacing the DOM) — closest() on a
+    // detached node returns null, which would look like "clicked outside"
+    // and immediately re-close a panel that was just opened. Skip in that case.
+    if (!e.target.isConnected) return;
+    if (!e.target.closest('.sp-wrap') && S.itForm && S.itForm.pickerOpen) {
+      S.itForm.pickerOpen = null;
+      render();
+    }
+    if (!e.target.closest('.sp-wrap') && S.itForm && S.itForm.regOpen) {
+      S.itForm.regOpen = false;
+      render();
+    }
+    if (!e.target.closest('.sp-wrap') && S.itForm && S.itForm.editPickOpen) {
+      S.itForm.editPickOpen = false;
+      render();
+    }
+    if (!e.target.closest('.sp-wrap') && S.boForm && (S.boForm.uOpen || S.boForm.fOpen)) {
+      S.boForm.uOpen = false;
+      S.boForm.fOpen = false;
+      render();
+    }
+    if (!e.target.closest('.sp-wrap') && S.mgForm && (S.mgForm.uOpen || S.mgForm.fOpen)) {
+      S.mgForm.uOpen = false;
+      S.mgForm.fOpen = false;
+      render();
+    }
+  });
+
+  // Date range popup clicks
+  document.addEventListener('click', (e) => {
+    if (!drState) return;
+    const popup = document.getElementById('drPopup');
+    if (!popup) return;
+    if (
+      !popup.contains(e.target) &&
+      !e.target.closest('[data-action="open-daterange"]') &&
+      !e.target.closest('.search-ic')
+    ) {
+      closeDateRange();
+      return;
+    }
+    const preset = e.target.closest('[data-drpreset]');
+    if (preset) {
+      drSelectPreset(preset.getAttribute('data-drpreset'));
+      return;
+    }
+    const day = e.target.closest('[data-drday]');
+    if (day) {
+      const iso = day.getAttribute('data-drday');
+      drSelectDay(new Date(iso + 'T00:00:00'));
+      return;
+    }
+    const nav = e.target.closest('[data-drnav]');
+    if (nav) {
+      if (nav.getAttribute('data-drnav') === 'prev') drPrevMonth();
+      else drNextMonth();
+      return;
+    }
+    const action = e.target.closest('[data-draction]');
+    if (action) {
+      if (action.getAttribute('data-draction') === 'apply') applyDateRange();
+      else closeDateRange();
+      return;
+    }
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    const rptResize = e.target.closest('.rpt-resize');
+    if (rptResize) {
+      const th = rptResize.closest('th');
+      const col = rptResize.getAttribute('data-col');
+      eResizeCtx = {
+        col,
+        th,
+        startX: e.clientX,
+        startW: th.getBoundingClientRect().width,
+        isRpt: true,
+      };
+      e.preventDefault();
+      return;
+    }
+    const erEl = e.target.closest('.eresize');
+    if (erEl) {
+      const th = erEl.closest('th');
+      const col = erEl.getAttribute('data-ecol');
+      eResizeCtx = { col, th, startX: e.clientX, startW: th.getBoundingClientRect().width };
+      e.preventDefault();
+      return;
+    }
+    const rrEl = e.target.closest('.row-resize');
+    if (rrEl) {
+      const tr = rrEl.closest('tr');
+      if (tr) {
+        rowResizeCtx = { tr, startY: e.clientY, startH: tr.getBoundingClientRect().height };
+        e.preventDefault();
+        return;
+      }
+    }
+    const el = e.target.closest('[data-action="resize"]');
+    if (!el) return;
+    const t = el.getAttribute('data-table'),
+      c = el.getAttribute('data-col');
+    const th = el.closest('th');
+    el.classList.add('active');
+    resizeCtx = { t, c, el, startX: e.clientX, startW: th.getBoundingClientRect().width };
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (eResizeCtx) {
+      const nw = Math.max(30, Math.round(eResizeCtx.startW + (e.clientX - eResizeCtx.startX)));
+      eResizeCtx.th.style.width = nw + 'px';
+      eResizeCtx.th.style.minWidth = nw + 'px';
+      eResizeCtx.th.style.maxWidth = nw + 'px';
+      return;
+    }
+    if (rowResizeCtx) {
+      const nh = Math.max(28, Math.round(rowResizeCtx.startH + (e.clientY - rowResizeCtx.startY)));
+      rowResizeCtx.tr.style.height = nh + 'px';
+      return;
+    }
+    if (!resizeCtx) return;
+    const nw = Math.max(60, Math.round(resizeCtx.startW + (e.clientX - resizeCtx.startX)));
+    const th = document.querySelector(`table.dt th[data-col="${resizeCtx.c}"]`);
+    if (th) {
+      th.style.width = nw + 'px';
+      th.style.minWidth = nw + 'px';
+      th.style.maxWidth = nw + 'px';
+    }
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (eResizeCtx) {
+      const nw = Math.max(30, Math.round(eResizeCtx.startW + (e.clientX - eResizeCtx.startX)));
+      if (eResizeCtx.isRpt) {
+        S.report.widths[eResizeCtx.col] = nw;
+        try {
+          localStorage.setItem('margin_rpt_widths', JSON.stringify(S.report.widths));
+        } catch (e) {}
+      } else {
+        S.entryWidths[eResizeCtx.col] = nw;
+        saveEntryWidths();
+      }
+      eResizeCtx = null;
+      return;
+    }
+    if (rowResizeCtx) {
+      rowResizeCtx = null;
+      return;
+    }
+    if (!resizeCtx) return;
+    S.dt[resizeCtx.t].widths[resizeCtx.c] = Math.max(
+      60,
+      Math.round(resizeCtx.startW + (e.clientX - resizeCtx.startX))
+    );
+    persistTablePref(resizeCtx.t);
+    resizeCtx.el.classList.remove('active');
+    resizeCtx = null;
+    render();
+  });
+
+  /* ============================= RENDER ============================= */
+  function render() {
+    const app = document.getElementById('app');
+    if (!S.ready) {
+      app.innerHTML = `<div class="loading-screen"><div class="spinner"></div><div>Loading margin data…</div></div>`;
+      return;
+    }
+    if (S.loadError) {
+      app.innerHTML = `<div class="login-wrap"><div class="login-card"><div class="login-top"><div class="login-eyebrow">Setup</div><h1>Sheet load failed</h1></div><div class="login-body"><div class="login-error">${esc(S.loadError)}</div><div class="login-hint">1) Open via the Apps Script <b>/exec</b> URL. 2) Required tabs: LOGIN PAGE, MASTER EQUITY, MASTER COMODDITY, RESPONSES EQUITY, RESPONSES COMODDITY, RESPONSES 2 EQUITY, RESPONSES 2 COMODDITY. 3) Deploy access = "Anyone".</div><button class="btn btn-gold btn-block" style="margin-top:14px;" data-action="syncnow">Retry</button></div></div></div>`;
+      return;
+    }
+    if (!S.user) {
+      app.innerHTML = renderLogin();
+      return;
+    }
+    // Save scroll positions before re-render
+    const rptScroll = document.querySelector('.rpt-scroll');
+    const dtScroll = document.querySelector('.dt-scroll');
+    const itformScroll = document.querySelector('.itform-body');
+    const boPage = document.querySelector('.bo-page'); // Backoffice / Margin page (mobile = its own scroller)
+    const boWrap = document.querySelector('.bo-tablewrap'); // its table's internal scroll
+    const savedRptScrollLeft = rptScroll ? rptScroll.scrollLeft : 0;
+    const savedRptScrollTop = rptScroll ? rptScroll.scrollTop : 0;
+    const savedDtScrollLeft = dtScroll ? dtScroll.scrollLeft : 0;
+    const savedDtScrollTop = dtScroll ? dtScroll.scrollTop : 0;
+    const savedItformScrollTop = itformScroll ? itformScroll.scrollTop : 0;
+    const savedBoPageTop = boPage ? boPage.scrollTop : 0;
+    const savedBoWrapLeft = boWrap ? boWrap.scrollLeft : 0;
+    const savedBoWrapTop = boWrap ? boWrap.scrollTop : 0;
+    let inner = '';
+    // Show one clean loading state from login until the batch arrives — no
+    // empty-page flash, and it's correct for every user (incl. IT-Details-only
+    // users who never load equity/response data).
+    if (!S.dataReady) {
+      inner = `<div class="empty-state" style="padding-top:80px;"><div class="spinner" style="margin:0 auto 16px;"></div><div class="big">Loading data…</div><div style="margin-top:6px;">Aapka data load ho raha hai, kuch seconds lagenge.</div></div>`;
+    } else if (S.page === 'dashboard') inner = renderDashboard();
+    else if (S.page === 'profile') inner = renderProfilePage();
+    else if (S.page === 'appearance') inner = renderAppearancePage();
+    else if (S.page === 'entryEquity') inner = renderEntry('equity');
+    else if (S.page === 'entryCommodity') inner = renderEntry('commodity');
+    else if (S.page === 'reportEquity') inner = renderReport('equity');
+    else if (S.page === 'reportCommodity') inner = renderReport('commodity');
+    else if (S.page === 'itDetails') inner = renderITDetails();
+    else if (S.page === 'backoffice') inner = renderBackoffice();
+    else if (S.page === 'marginEntry') inner = renderMarginEntry();
+    else if (TABLE_DEFS[S.page]) inner = renderDataTable(S.page);
+    else
+      inner = `<div class="empty-state"><div class="big">Select a page</div>Left mein <b>MARGIN</b> pe click karke apna page choose karein.</div>`;
+    // Only the CONTENT changes on most interactions (e.g. a dropdown pick). The
+    // shell — sidebar + topbar (live clock, font/theme controls) — is expensive
+    // to rebuild and visibly flickers (the clock resets to --:--:--). So compute
+    // a signature of everything the shell depends on; if it's unchanged and the
+    // shell already exists, swap just the .content and leave the shell (and its
+    // ticking clock) alone.
+    const shellSig = [
+      S.user.id,
+      S.user.name,
+      S.page,
+      [...S.sidebarOpenSections].sort().join(','),
+      S.darkMode ? 1 : 0,
+      S.syncing ? 1 : 0,
+      S.dataReady ? 1 : 0,
+      S.profileMenuOpen ? 1 : 0,
+      S.showLogoutConfirm ? 1 : 0,
+      S.sidebarCollapsed ? 1 : 0,
+      S.sidebarDrawerOpen ? 1 : 0,
+      S.toast ? S.toast.msg + '|' + (S.toast.isErr ? 1 : 0) : '',
+      allNavItems()
+        .map((n) => (S.user[n.perm] ? 1 : 0))
+        .join(''),
+    ].join('~');
+    const contentEl = document.querySelector('.content');
+    if (contentEl && app.__shellSig === shellSig) {
+      contentEl.innerHTML = inner; // shell untouched → no topbar/clock flicker
+    } else {
+      app.innerHTML = renderShell(inner);
+      app.__shellSig = shellSig;
+    }
+    // Restore scroll positions after re-render
+    const rptScroll2 = document.querySelector('.rpt-scroll');
+    const dtScroll2 = document.querySelector('.dt-scroll');
+    if (rptScroll2) {
+      rptScroll2.scrollLeft = savedRptScrollLeft;
+      rptScroll2.scrollTop = savedRptScrollTop;
+    }
+    if (dtScroll2) {
+      dtScroll2.scrollLeft = savedDtScrollLeft;
+      dtScroll2.scrollTop = savedDtScrollTop;
+    }
+    const itformScroll2 = document.querySelector('.itform-body');
+    if (itformScroll2) itformScroll2.scrollTop = savedItformScrollTop;
+    // Backoffice / Margin: keep the page + table scroll where they were so opening
+    // or changing the table's User-ID filter doesn't jump the view to the top.
+    const boPage2 = document.querySelector('.bo-page');
+    if (boPage2) boPage2.scrollTop = savedBoPageTop;
+    const boWrap2 = document.querySelector('.bo-tablewrap');
+    if (boWrap2) {
+      boWrap2.scrollLeft = savedBoWrapLeft;
+      boWrap2.scrollTop = savedBoWrapTop;
+    }
+    if (S.page === 'entryEquity' || S.page === 'entryCommodity') initEntryDatePicker();
+    if (S.page === 'itDetails' && S.itForm && S.itForm.open) initItDatePicker();
+  }
+
+  loadAll();
+</script>

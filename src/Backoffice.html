@@ -1,0 +1,533 @@
+<!-- ═══ Backoffice.html — "Backoffice Code" page (IT DETAILS section) ═══
+     Works on the SAME RESPONSES-NEW data already loaded for IT Details
+     (S.itDetails.rows holds every column). It never adds rows — it UPDATES an
+     existing ACTIVE row in place: back-office timestamp + BACK OFFICE CODE +
+     REMARK. The IT Details add/edit flow and its table are untouched.
+
+     Left card  = the entry form (pick a Unique No. → fill Back Office Code +
+                  Remark → Save).
+     Right card = the pending list. Default shows ACTIVE rows whose Back Office
+                  Code is still blank; pick a User ID to instead see ALL that
+                  user's ACTIVE rows (including ones already coded). -->
+<script>
+  function boCodeHeader() {
+    return resolveItHeader(['BACK OFFICE CODE', 'BACKOFFICE CODE']);
+  }
+  function boRemarkHeader() {
+    return resolveItHeader(['REMARKS', 'REMARK']);
+  }
+
+  // Table columns (in the sheet's own order). No Remark column.
+  const BO_COLS = [
+    { key: 'date', label: 'Date', w: 96 },
+    { key: 'status', label: 'Status', w: 82 },
+    { key: 'unique', label: 'Unique No.', w: 92 },
+    { key: 'userId', label: 'User ID', w: 92 },
+    { key: 'name', label: 'User Name', w: 150 },
+    { key: 'group', label: 'Group Name', w: 150 },
+    { key: 'segment', label: 'Segment', w: 104 },
+    { key: 'software', label: 'Software', w: 92 },
+    { key: 'code', label: 'Back Office Code', w: 170 },
+  ];
+  const BO_PAGE_SIZES = [25, 50, 100];
+
+  function ensureBoForm() {
+    if (!S.boForm) {
+      S.boForm = {
+        picked: '', // Unique No. currently loaded into the form
+        code: '',
+        remark: '',
+        saving: false,
+        error: '',
+        showErrors: false,
+        uOpen: false,
+        uQuery: '', // Unique No. picker (form)
+        userFilter: '', // chosen User ID filter (table)
+        fOpen: false,
+        fQuery: '', // User ID picker (table)
+        search: {}, // per-column search text
+        searchOpen: '', // which column's filter box is revealed
+        globalQuery: '', // global "search any column" box
+        page: 1,
+        pageSize: 50,
+      };
+    }
+    return S.boForm;
+  }
+
+  // Flatten one record into the table's display columns.
+  function boRowCols(r) {
+    return {
+      date: String(r[resolveItHeader(['TIMESTAMP', 'DATE'])] || '').split(' ')[0],
+      status: String(r[itStatusHeader()] || ''),
+      unique: String(r[itUniqueNoHeader()] || ''),
+      userId: String(r[resolveItHeader(['USER ID'])] || ''),
+      name: String(r[resolveItHeader(['USER NAME'])] || ''),
+      group: String(r[resolveItHeader(['GROUP NAME'])] || ''),
+      segment: String(r[resolveItHeader(['SEGMENT', 'SEGEMNT'])] || ''),
+      software: String(r[resolveItHeader(['SOFTWARE'])] || ''),
+      code: String(r[boCodeHeader()] || ''),
+    };
+  }
+
+  // Every ACTIVE record with a real Unique No. + User ID.
+  function boActiveRecords() {
+    const statusH = itStatusHeader(),
+      uniqueH = itUniqueNoHeader(),
+      userIdH = resolveItHeader(['USER ID']);
+    return (S.itDetails.rows || []).filter(
+      (r) =>
+        String(r[statusH] || '').trim().toUpperCase() === 'ACTIVE' &&
+        String(r[uniqueH] || '').trim() &&
+        String(r[userIdH] || '').trim()
+    );
+  }
+
+  // Rows for the pending table. Default = ACTIVE + Back Office Code blank.
+  // When a User ID is chosen, show ALL that user's ACTIVE rows (coded or not).
+  function boTableRows() {
+    const F = ensureBoForm();
+    const userIdH = resolveItHeader(['USER ID']),
+      codeH = boCodeHeader();
+    let rows = boActiveRecords();
+    if (F.userFilter) {
+      const t = F.userFilter.trim().toUpperCase();
+      rows = rows.filter((r) => String(r[userIdH] || '').trim().toUpperCase() === t);
+    } else {
+      rows = rows.filter((r) => !String(r[codeH] || '').trim());
+    }
+    return rows;
+  }
+
+  // Source for the TOP FORM's Unique No. dropdown — independent of the table.
+  // ALL active records (coded or not) so a record is never removed after it's
+  // coded: re-picking a coded one fills the form with its existing Back Office
+  // Code + Remark, and changing the code triggers the approval flow.
+  function boFormPickRows() {
+    return boActiveRecords();
+  }
+
+  // Distinct User IDs (for the filter dropdown).
+  function boUserIds() {
+    const userIdH = resolveItHeader(['USER ID']);
+    const seen = {};
+    const out = [];
+    boActiveRecords().forEach((r) => {
+      const id = String(r[userIdH] || '').trim();
+      if (id && !seen[id.toUpperCase()]) {
+        seen[id.toUpperCase()] = true;
+        out.push(id);
+      }
+    });
+    return out.sort();
+  }
+
+  function boRecordByUnique(uniqueNo) {
+    const uniqueH = itUniqueNoHeader();
+    return boActiveRecords().find((r) => String(r[uniqueH]).trim() === String(uniqueNo).trim()) || null;
+  }
+
+  /* ---------------- form: pick a Unique No. ---------------- */
+  function onBoPickUnique(uniqueNo) {
+    const F = ensureBoForm();
+    const rec = boRecordByUnique(uniqueNo);
+    if (!rec) return;
+    F.picked = uniqueNo;
+    F.uOpen = false;
+    F.showErrors = false;
+    F.error = '';
+    // Preload any values already on the record (in case it was coded before).
+    F.code = String(rec[boCodeHeader()] || '');
+    F.remark = String(rec[boRemarkHeader()] || '');
+    render();
+  }
+  function onBoUToggle() {
+    const F = ensureBoForm();
+    F.uOpen = !F.uOpen;
+    F.uQuery = '';
+    render();
+    if (F.uOpen) {
+      const inp = document.querySelector('.sp-wrap[data-bou="1"] .sp-search');
+      if (inp) inp.focus();
+    }
+  }
+
+  /* ---------------- table: filter by User ID ---------------- */
+  function onBoPickUser(uid) {
+    const F = ensureBoForm();
+    F.userFilter = uid;
+    F.fOpen = false;
+    F.page = 1;
+    render();
+  }
+  function onBoUserClear() {
+    const F = ensureBoForm();
+    F.userFilter = '';
+    F.fOpen = false;
+    F.page = 1;
+    render();
+  }
+
+  /* ---------------- table: column search + global search + pagination ---------------- */
+  // Reveal / hide a column's filter box (same UX as the IT Details table's ⌕).
+  // Hiding a column also clears its filter so no hidden filter stays active.
+  function onBoToggleSearch(col) {
+    const F = ensureBoForm();
+    if (F.searchOpen === col) {
+      F.searchOpen = '';
+      if (F.search[col]) {
+        delete F.search[col];
+        F.page = 1;
+      }
+    } else {
+      F.searchOpen = col;
+    }
+    render();
+    if (F.searchOpen === col) {
+      const inp = document.querySelector(`.bo-table input[data-action="bo-colsearch"][data-bocol="${col}"]`);
+      if (inp) inp.focus();
+    }
+  }
+  function onBoColSearch(col, val) {
+    const F = ensureBoForm();
+    F.search[col] = val;
+    F.page = 1;
+    render();
+  }
+  function onBoGlobalSearch(val) {
+    const F = ensureBoForm();
+    F.globalQuery = val;
+    F.page = 1;
+    render();
+  }
+  function onBoGlobalClear() {
+    const F = ensureBoForm();
+    F.globalQuery = '';
+    F.page = 1;
+    render();
+  }
+  function onBoPage(dir) {
+    const F = ensureBoForm();
+    const size = F.pageSize || 50;
+    const pages = Math.max(1, Math.ceil(boFilteredRows().length / size));
+    let p = F.page || 1;
+    if (dir === 'first') p = 1;
+    else if (dir === 'prev') p = Math.max(1, p - 1);
+    else if (dir === 'next') p = Math.min(pages, p + 1);
+    else if (dir === 'last') p = pages;
+    F.page = p;
+    render();
+  }
+  function onBoPageSize(n) {
+    const F = ensureBoForm();
+    F.pageSize = parseInt(n, 10) || 50;
+    F.page = 1;
+    render();
+  }
+  function onBoFToggle() {
+    const F = ensureBoForm();
+    F.fOpen = !F.fOpen;
+    F.fQuery = '';
+    render();
+    if (F.fOpen) {
+      const inp = document.querySelector('.sp-wrap[data-bof="1"] .sp-search');
+      if (inp) inp.focus();
+    }
+  }
+
+  /* ---------------- save ---------------- */
+  function applyBoSaveLocal(res) {
+    const statusH = itStatusHeader(),
+      uniqueH = itUniqueNoHeader();
+    const row = (S.itDetails.rows || []).find(
+      (r) =>
+        String(r[uniqueH] || '').trim() === String(res.uniqueNo).trim() &&
+        String(r[statusH] || '').trim().toUpperCase() === 'ACTIVE'
+    );
+    if (!row) return;
+    if (res.codeHeader) row[res.codeHeader] = res.code;
+    if (res.remarkHeader) row[res.remarkHeader] = res.remark;
+    if (res.tsHeader) row[res.tsHeader] = res.timestamp;
+  }
+
+  async function saveBackofficeForm() {
+    const F = ensureBoForm();
+    if (F.saving) return;
+    if (!F.picked) {
+      F.error = 'Choose a Unique No. to update first.';
+      render();
+      return;
+    }
+    if (!String(F.code || '').trim()) {
+      F.showErrors = true;
+      F.error = 'Back Office Code is required.';
+      render();
+      return;
+    }
+    F.error = '';
+    F.saving = true;
+    render();
+    showSavingOverlay('Saving Backoffice Code…');
+    try {
+      const res = await runServer('saveBackofficeCode', {
+        uniqueNo: F.picked,
+        code: F.code,
+        remark: F.remark,
+        loginId: S.user.id,
+      });
+      hideSavingOverlay();
+      // Nothing changed — code and remark are the same. Keep the form as-is.
+      if (res && res.status === 'nochange') {
+        F.saving = false;
+        showToast(res.message || 'Nothing to update.', true);
+        render();
+        return;
+      }
+      // Duplicate: an identical change is already pending approval — soft warn.
+      if (res && res.status === 'duplicate') {
+        F.saving = false;
+        showToast(res.message || 'Already pending approval.', true);
+        render();
+        return;
+      }
+      if (!res || res.status !== 'ok') {
+        F.saving = false;
+        F.error = (res && res.message) || 'Save failed.';
+        render();
+        return;
+      }
+      // 'new' / 'remark' write RESPONSES-NEW in place -> sync locally.
+      // 'approval' leaves RESPONSES-NEW untouched (it went to the approval tab).
+      if (res.mode === 'approval') {
+        showToast(
+          res.emailWarning
+            ? 'Sent for approval (email failed: ' + res.emailWarning + ')'
+            : 'Code change sent for approval.',
+          !!res.emailWarning
+        );
+      } else {
+        applyBoSaveLocal(res);
+        showToast(res.mode === 'remark' ? 'Remark updated.' : 'Backoffice Code saved.', false);
+      }
+      F.saving = false;
+      F.picked = '';
+      F.code = '';
+      F.remark = '';
+      F.showErrors = false;
+      render();
+    } catch (err) {
+      hideSavingOverlay();
+      F.saving = false;
+      F.error = err.message;
+      render();
+    }
+  }
+
+  /* ============================= RENDER ============================= */
+  function renderBoUniquePicker() {
+    const F = ensureBoForm();
+    const uniqueH = itUniqueNoHeader();
+    // Form-only source — always the pending set, never linked to the table.
+    const all = boFormPickRows();
+    const query = F.uOpen ? F.uQuery || '' : '';
+    const filtered = query
+      ? all.filter((r) => String(r[uniqueH] || '').toLowerCase().includes(query.toLowerCase()))
+      : all;
+    return `<div class="sp-wrap" data-bou="1">
+      <button type="button" class="sp-trigger" data-action="bo-utoggle">
+        ${F.picked ? `<span class="sp-trigger-label">${esc(F.picked)}</span>` : `<span class="sp-placeholder">Choose Unique No…</span>`}
+        ${F.picked ? `<span class="sp-clear" data-action="bo-uclear" title="Clear">✕</span>` : ''}
+        <span class="sp-caret">▾</span>
+      </button>
+      ${
+        F.uOpen
+          ? `<div class="sp-panel">
+        <input type="text" class="sp-search" data-action="bo-usearch" placeholder="Search Unique No…" value="${esc(query)}">
+        <div class="sp-options">${filtered.length ? filtered.map((r) => `<div class="sp-option ${F.picked === String(r[uniqueH]) ? 'selected' : ''}" data-action="bo-uchoose" data-unique="${esc(r[uniqueH])}"><span class="sp-check">${F.picked === String(r[uniqueH]) ? '✓' : ''}</span>${esc(r[uniqueH])}</div>`).join('') : '<div class="sp-empty">No active records</div>'}</div>
+      </div>`
+          : ''
+      }
+    </div>`;
+  }
+
+  function renderBoUserPicker() {
+    const F = ensureBoForm();
+    const users = boUserIds();
+    const query = F.fOpen ? F.fQuery || '' : '';
+    const filtered = query ? users.filter((u) => u.toLowerCase().includes(query.toLowerCase())) : users;
+    return `<div class="sp-wrap" data-bof="1">
+      <button type="button" class="sp-trigger" data-action="bo-ftoggle">
+        ${F.userFilter ? `<span class="sp-trigger-label">${esc(F.userFilter)}</span>` : `<span class="sp-placeholder">All pending · filter User ID</span>`}
+        ${F.userFilter ? `<span class="sp-clear" data-action="bo-fclear" title="Clear">✕</span>` : ''}
+        <span class="sp-caret">▾</span>
+      </button>
+      ${
+        F.fOpen
+          ? `<div class="sp-panel">
+        <input type="text" class="sp-search" data-action="bo-fsearch" placeholder="Search User ID…" value="${esc(query)}">
+        <div class="sp-options">${filtered.length ? filtered.map((u) => `<div class="sp-option ${F.userFilter === u ? 'selected' : ''}" data-action="bo-fchoose" data-uid="${esc(u)}"><span class="sp-check">${F.userFilter === u ? '✓' : ''}</span>${esc(u)}</div>`).join('') : '<div class="sp-empty">No matches</div>'}</div>
+      </div>`
+          : ''
+      }
+    </div>`;
+  }
+
+  // Compact form bar across the TOP (minimal height). Read-only record fields
+  // + the two editable (yellow) fields + Clear/Save. Same field styling as the
+  // IT Details form.
+  function renderBoForm() {
+    const F = ensureBoForm();
+    const rec = F.picked ? boRecordByUnique(F.picked) : null;
+    const disp = (aliases) => (rec ? esc(rec[resolveItHeader(aliases)] || '—') : '—');
+    const codeErr = F.showErrors && !String(F.code || '').trim() ? 'cell-error' : '';
+    const dis = F.picked ? '' : 'disabled';
+    return `<div class="itform-page bo-topcard">
+      <div class="itform-head"><h2>Code Entry</h2>${F.error ? `<span class="bo-headerr">${esc(F.error)}</span>` : ''}</div>
+      <div class="bo-formbar">
+        <div class="bo-left">
+          <div class="itf-cell"><label>Unique No. <span class="req-star">*</span></label>${renderBoUniquePicker()}</div>
+          <div class="itf-cell"><label>User ID</label><div class="cell-ro">${disp(['USER ID'])}</div></div>
+          <div class="itf-cell"><label>Segment</label><div class="cell-ro">${disp(['SEGMENT', 'SEGEMNT'])}</div></div>
+          <div class="itf-cell"><label>User Name</label><div class="cell-ro">${disp(['USER NAME'])}</div></div>
+          <div class="itf-cell"><label>Group Name</label><div class="cell-ro">${disp(['GROUP NAME'])}</div></div>
+          <div class="itf-cell"><label>Software</label><div class="cell-ro">${disp(['SOFTWARE'])}</div></div>
+        </div>
+        <div class="bo-right">
+          <div class="itf-cell bo-edit"><label>Back Office Code <span class="req-star">*</span></label><input type="text" class="${codeErr}" data-bo="code" value="${esc(F.code)}" placeholder="Enter Back Office Code" autocomplete="off" ${dis}></div>
+          <div class="itf-cell bo-edit bo-remark"><label>Remark</label><textarea data-bo="remark" placeholder="Enter remark (optional)" ${dis}>${esc(F.remark)}</textarea></div>
+        </div>
+      </div>
+      <div class="bo-actions">
+        <button class="btn btn-ghost" data-action="bo-uclear" ${F.picked ? '' : 'disabled'}>Clear</button>
+        <button class="btn btn-gold" data-action="bo-save" ${F.saving || !F.picked ? 'disabled' : ''}>${F.saving ? '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Saving…' : 'Save'}</button>
+      </div>
+    </div>`;
+  }
+
+  // Base rows (active + pending / User-ID filter) mapped to display columns,
+  // then narrowed — chainably — by the global search AND every per-column
+  // search box. Each filter operates on the result of the previous one, so
+  // column filters, the global box, and the User-ID dropdown all compose.
+  function boFilteredRows() {
+    const F = ensureBoForm();
+    const search = F.search || {};
+    const g = String(F.globalQuery || '').trim().toLowerCase();
+    return boTableRows()
+      .map((r) => ({ r: r, c: boRowCols(r), uni: String(r[itUniqueNoHeader()] || '') }))
+      .filter((o) => !g || BO_COLS.some((col) => String(o.c[col.key] || '').toLowerCase().includes(g)))
+      .filter((o) =>
+        BO_COLS.every((col) => {
+          const q = String(search[col.key] || '').trim().toLowerCase();
+          return !q || String(o.c[col.key] || '').toLowerCase().includes(q);
+        })
+      );
+  }
+
+  // Full-width table BELOW the form — columns in the sheet's own order, with a
+  // Sr No column, per-column search, and a paginated footer. No Remark column.
+  function renderBoTable() {
+    const F = ensureBoForm();
+    const all = boFilteredRows();
+    const total = all.length;
+    const size = F.pageSize || 50;
+    const pages = Math.max(1, Math.ceil(total / size));
+    const page = Math.min(Math.max(1, F.page || 1), pages);
+    F.page = page;
+    const start = (page - 1) * size;
+    const slice = all.slice(start, start + size);
+
+    const head =
+      '<tr><th class="bo-sr"><div class="th-inner"><div class="th-row"><span class="th-label" style="cursor:default;">#</span></div></div></th>' +
+      BO_COLS.map((c) => {
+        const open = F.searchOpen === c.key;
+        const filterHtml = open
+          ? `<div class="th-filter"><input type="text" data-action="bo-colsearch" data-bocol="${c.key}" value="${esc(F.search[c.key] || '')}" placeholder="Filter ${esc(c.label)}…"></div>`
+          : '';
+        return `<th style="min-width:${c.w}px">
+          <div class="th-inner">
+            <div class="th-row">
+              <span class="th-label">${esc(c.label)}</span>
+              <span class="search-ic ${open ? 'on' : ''} ${F.search[c.key] ? 'on' : ''}" data-action="bo-togglesearch" data-bocol="${c.key}" title="Search ${esc(c.label)}">⌕</span>
+            </div>
+            ${filterHtml}
+          </div>
+        </th>`;
+      }).join('') +
+      '</tr>';
+
+    const body = slice.length
+      ? slice
+          .map((o, i) => {
+            const active = F.picked === o.uni ? 'bo-row-active' : '';
+            return (
+              `<tr class="${active}" data-action="bo-row" data-unique="${esc(o.uni)}">` +
+              `<td class="bo-sr">${start + i + 1}</td>` +
+              BO_COLS.map((col) => `<td>${esc(o.c[col.key] || '')}</td>`).join('') +
+              '</tr>'
+            );
+          })
+          .join('')
+      : `<tr><td colspan="${BO_COLS.length + 1}" class="bo-empty">${
+          F.globalQuery || Object.keys(F.search).some((k) => F.search[k])
+            ? 'No rows match your search.'
+            : F.userFilter
+              ? 'No active records for this User ID.'
+              : 'Nothing pending — all active records are coded.'
+        }</td></tr>`;
+
+    const first = total ? start + 1 : 0;
+    const last = Math.min(start + size, total);
+    const foot = `<div class="bo-foot">
+      <div class="bo-foot-info">${first}–${last} of ${total}</div>
+      <div class="bo-foot-size">
+        Rows:
+        <select class="bo-pagesize" data-action="bo-pagesize">
+          ${BO_PAGE_SIZES.map((n) => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}</option>`).join('')}
+        </select>
+      </div>
+      <div class="bo-foot-nav">
+        <button class="bo-pg" data-action="bo-page" data-pg="first" ${page <= 1 ? 'disabled' : ''}>«</button>
+        <button class="bo-pg" data-action="bo-page" data-pg="prev" ${page <= 1 ? 'disabled' : ''}>‹</button>
+        <span class="bo-foot-page">${page} / ${pages}</span>
+        <button class="bo-pg" data-action="bo-page" data-pg="next" ${page >= pages ? 'disabled' : ''}>›</button>
+        <button class="bo-pg" data-action="bo-page" data-pg="last" ${page >= pages ? 'disabled' : ''}>»</button>
+      </div>
+    </div>`;
+
+    const g = F.globalQuery || '';
+    return `<div class="itform-page bo-tablecard">
+      <div class="itform-head bo-thead">
+        <div class="bo-thead-left">
+          <h2 class="bo-thead-title">Records <span class="bo-count">${total}</span></h2>
+          <div class="itreg-picker">${renderBoUserPicker()}</div>
+        </div>
+        <div class="bo-gsearch">
+          <span class="bo-gsearch-ic">⌕</span>
+          <input type="text" data-action="bo-globalsearch" value="${esc(g)}" placeholder="Search any column…">
+          ${g ? '<span class="bo-gsearch-clear" data-action="bo-globalclear" title="Clear">✕</span>' : ''}
+        </div>
+      </div>
+      <div class="bo-tablewrap">
+        <table class="bo-table">
+          <thead>${head}</thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+      ${foot}
+    </div>`;
+  }
+
+  function renderBackoffice() {
+    ensureBoForm();
+    if (!S.itDetails.loaded && !S.itDetails.error) {
+      return `<div class="empty-state" style="padding-top:80px;"><div class="spinner" style="margin:0 auto 16px;"></div><div class="big">Loading…</div></div>`;
+    }
+    if (S.itDetails.error) {
+      return `<div class="empty-state"><div class="big">Could not load records</div>${esc(S.itDetails.error)}<div style="margin-top:14px;"><button class="btn btn-gold" data-action="itdetails-refresh">Retry</button></div></div>`;
+    }
+    return `<div class="bo-page">
+      ${renderBoForm()}
+      ${renderBoTable()}
+    </div>`;
+  }
+</script>

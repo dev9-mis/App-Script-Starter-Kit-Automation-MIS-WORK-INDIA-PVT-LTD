@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Clasp auth (contains OAuth tokens — never commit)
+.clasprc.json
+~/.clasprc.json
+
+# Environment / secrets
+.env
+.env.*
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+npm-debug.log*
+
+# Build / temp
+dist/
+tmp/
