@@ -209,9 +209,12 @@ them.
 ### 1. Get the code
 
 **Clone with git:**
+
 ```bash
-git clone git@github.com:dev9-mis/App-Script-Starter-Kit-Automation-MIS-WORK-INDIA-PVT-LTD.git
+git clone https://github.com/dev9-mis/App-Script-Starter-Kit-Automation-MIS-WORK-INDIA-PVT-LTD.git
 ```
+
+(Have SSH keys set up with GitHub already? `git@github.com:dev9-mis/App-Script-Starter-Kit-Automation-MIS-WORK-INDIA-PVT-LTD.git` works too — HTTPS is just the one that needs zero setup.)
 
 **Or download a ZIP:** on the
 [repo page](https://github.com/dev9-mis/App-Script-Starter-Kit-Automation-MIS-WORK-INDIA-PVT-LTD),
@@ -254,31 +257,47 @@ Script project:
 }
 ```
 
-Pick one path:
+Both paths are the same three steps — get a Script ID, paste it in, sync.
+The only difference is which direction you sync first.
 
-**Option A — Connect to an existing project (keep your old code):**
+**Option A — Brand-new project (recommended default):**
+
+1. Go to [script.google.com](https://script.google.com) → **New project**
+   (or, from a Google Sheet: **Extensions → Apps Script**). This gives you
+   an empty Apps Script project in ~10 seconds — no need for `clasp create`.
+2. **Project Settings** (gear icon) → copy the **Script ID**.
+3. Paste it into `.clasp.json`, replacing `PASTE_YOUR_APPS_SCRIPT_ID_HERE`.
+4. Push the starter kit's code into that empty project:
+
+   ```bash
+   npm run push
+   ```
+
+   You already have `Code.gs` / `Index.html` / `appsscript.json` locally —
+   no `pull` needed. From here, edit those files (by hand or with AI) and
+   `npm run push` again whenever you want the change live at the `/dev` URL.
+
+**Option B — Connect to an existing project (keep your old code):**
 
 1. Open that project in the Apps Script editor.
 2. **Project Settings** (gear icon) → copy the **Script ID**.
 3. Paste it into `.clasp.json`, replacing `PASTE_YOUR_APPS_SCRIPT_ID_HERE`.
-4. Pull the existing code down into this repo (see
-   [How it works](#how-it-works) for exactly what this does):
+4. Pull the existing code down into this repo, overwriting the starter
+   files (see [How it works](#how-it-works) for exactly what this does):
+
    ```bash
    npm run pull
    ```
+
 5. Check `src/appsscript.json` still has `"runtimeVersion": "V8"`. Modern
    projects should already have it, but an older manifest may pull down
    without it — add it and push once if it's missing.
 
-**Option B — Start a brand-new project:**
-
-```bash
-npx clasp create --type webapp --title "My Web App" --rootDir ./src
-```
-
-Creates a new Apps Script project, writes its Script ID into `.clasp.json`
-for you, and uses the starter `Code.gs` / `Index.html` in `src/` as your
-first version.
+> **Why not `clasp create`?** It refuses to run if a `.clasp.json` already
+> exists in the folder — and this repo ships one (with a placeholder
+> `scriptId`) so that clasp can find `rootDir`. Deleting it first just to
+> let `clasp create` regenerate it is more steps than pasting a Script ID
+> by hand, so Option A above is the simpler path for a new project.
 
 ### 5. Push, preview, deploy
 
@@ -328,6 +347,15 @@ whether the project is a web app.
 - **Wrong project synced** — check `scriptId` in `.clasp.json` matches
   **Project Settings** in the Apps Script editor for the project you intend
   to target.
+- **`npm install` prints a `uuid@9.0.1` deprecation warning and/or `npm
+  audit` reports moderate vulnerabilities** — these live entirely inside
+  `clasp`'s own dependencies (`google-auth-library`, `googleapis-common`,
+  and clasp's bundled MCP server support), not in this kit's code. `clasp`
+  is a local CLI tool talking to Google's API, not something exposed to end
+  users, so it's safe to ignore. Do **not** run `npm audit fix --force` —
+  it "fixes" this by downgrading to `clasp@2.5.0`, an older version that
+  predates features this kit relies on (like the `fileExtension` setting
+  in `.clasp.json`).
 
 ## License
 

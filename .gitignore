@@ -18,6 +18,10 @@ desktop.ini
 .vscode/
 *.code-workspace
 
+# Claude Code — personal settings only; .claude/settings.json (shared/team
+# config) is fine to commit if you add one later
+.claude/settings.local.json
+
 # Logs
 *.log
 npm-debug.log*
